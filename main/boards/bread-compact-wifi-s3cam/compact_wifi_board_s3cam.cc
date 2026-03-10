@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "adc_battery_monitor.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -62,10 +63,11 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 
 class CompactWifiBoardS3Cam : public WifiBoard {
 private:
- 
+
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+    AdcBatteryMonitor* adc_battery_monitor_;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -165,6 +167,16 @@ private:
         });
     }
 
+    void InitializeBatteryMonitor() {
+        adc_battery_monitor_ = new AdcBatteryMonitor(
+            ADC_UNIT_2,
+            BATTERY_ADC_CHANNEL,
+            BATTERY_UPPER_RESISTOR,
+            BATTERY_LOWER_RESISTOR,
+            CHARGING_STATUS_GPIO
+        );
+    }
+
 public:
     CompactWifiBoardS3Cam() :
         boot_button_(BOOT_BUTTON_GPIO) {
@@ -172,10 +184,11 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        InitializeBatteryMonitor();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
-        
+
     }
 
     virtual Led* GetLed() override {
@@ -208,6 +221,13 @@ public:
 
     virtual Camera* GetCamera() override {
         return camera_;
+    }
+
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        charging = adc_battery_monitor_->IsCharging();
+        discharging = adc_battery_monitor_->IsDischarging();
+        level = adc_battery_monitor_->GetBatteryLevel();
+        return true;
     }
 };
 

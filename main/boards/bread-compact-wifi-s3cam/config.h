@@ -303,6 +303,15 @@
 
 
 // A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_14
+//#define LAMP_GPIO GPIO_NUM_14
+
+// Battery configuration
+#define BATTERY_ADC_GPIO       GPIO_NUM_14
+#define BATTERY_ADC_CHANNEL    ADC2_CHANNEL_3
+#define BATTERY_VOLTAGE_MIN    3500 // 3.5V
+#define BATTERY_VOLTAGE_MAX    4200 // 4.2V
+#define BATTERY_UPPER_RESISTOR 4700 // 4.7k ohm
+#define BATTERY_LOWER_RESISTOR 1500 // 1.5k ohm
+#define CHARGING_STATUS_GPIO   GPIO_NUM_3
 
 #endif // _BOARD_CONFIG_H_
