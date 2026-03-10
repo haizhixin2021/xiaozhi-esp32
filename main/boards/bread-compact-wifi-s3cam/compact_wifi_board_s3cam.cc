@@ -168,8 +168,40 @@ private:
     }
 
     void InitializeBatteryMonitor() {
+        // Debug: Check GPIO3 and GPIO14 status
+        ESP_LOGI("Battery", "=== GPIO Debug Start ===");
+        
+        // Configure GPIO3 as input for charging detection
+        gpio_config_t gpio3_cfg = {
+            .pin_bit_mask = 1ULL << GPIO_NUM_3,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&gpio3_cfg);
+        
+        // Configure GPIO14 as input for ADC
+        gpio_config_t gpio14_cfg = {
+            .pin_bit_mask = 1ULL << GPIO_NUM_14,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&gpio14_cfg);
+        
+        // Read GPIO levels
+        int gpio3_level = gpio_get_level(GPIO_NUM_3);
+        int gpio14_level = gpio_get_level(GPIO_NUM_14);
+        
+        ESP_LOGI("Battery", "GPIO3 (Charging) level: %d", gpio3_level);
+        ESP_LOGI("Battery", "GPIO14 (ADC) level: %d", gpio14_level);
+        ESP_LOGI("Battery", "GPIO3 HIGH = Charging, LOW = Not charging");
+        ESP_LOGI("Battery", "=== GPIO Debug End ===");
+        
         adc_battery_monitor_ = new AdcBatteryMonitor(
-            ADC_UNIT_2,
+            ADC_UNIT_1,
             BATTERY_ADC_CHANNEL,
             BATTERY_UPPER_RESISTOR,
             BATTERY_LOWER_RESISTOR,
@@ -227,6 +259,16 @@ public:
         charging = adc_battery_monitor_->IsCharging();
         discharging = adc_battery_monitor_->IsDischarging();
         level = adc_battery_monitor_->GetBatteryLevel();
+        
+        // Debug: Log battery status every time
+        static int log_counter = 0;
+        if (log_counter++ % 10 == 0) {  // Log every 10 calls
+            ESP_LOGI("Battery", "Battery Level: %d%%, Charging: %s, Discharging: %s", 
+                     level, 
+                     charging ? "YES" : "NO", 
+                     discharging ? "YES" : "NO");
+        }
+        
         return true;
     }
 };
