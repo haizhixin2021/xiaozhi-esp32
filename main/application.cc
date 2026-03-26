@@ -9,6 +9,8 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "alarm_clock.h"
+#include "alarm_cloud_sync.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -98,6 +100,16 @@ void Application::Initialize() {
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
 
+    // Initialize alarm manager
+    auto& alarm_manager = AlarmManager::GetInstance();
+    alarm_manager.Initialize();
+    alarm_manager.SetAlarmCallback([this](const Alarm& alarm) {
+        ESP_LOGI(TAG, "Alarm triggered: %s", alarm.name.c_str());
+        Schedule([this, alarm]() {
+            StartAlarmRing(alarm.name);
+        });
+    });
+
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         auto display = Board::GetInstance().GetDisplay();
@@ -160,6 +172,19 @@ void Application::Initialize() {
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
+
+        // 初始化闹钟管理器
+    AlarmManager::GetInstance().Initialize();
+    
+    // 设置闹钟变更回调，实现实时同步
+    AlarmManager::GetInstance().SetAlarmChangeCallback(
+        [](const Alarm& alarm, const std::string& action) {
+            auto& sync = AlarmCloudSync::GetInstance();
+            if (!sync.IsSyncing()) {
+                ESP_LOGI("App", "Alarm changed: %s, syncing to cloud...", action.c_str());
+                sync.SyncToCloud(nullptr);
+            }
+        });
 }
 
 void Application::Run() {
@@ -277,6 +302,9 @@ void Application::HandleNetworkConnectedEvent() {
             vTaskDelete(NULL);
         }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
     }
+
+    // 初始化云端同步（网络连接后）
+    InitializeAlarmCloudSync();
 
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
@@ -609,6 +637,38 @@ void Application::InitializeProtocol() {
     protocol_->Start();
 }
 
+void Application::InitializeAlarmCloudSync() {
+    Settings settings("cloud", false);
+    std::string cloud_url = settings.GetString("alarm_url");
+    
+    if (cloud_url.empty()) {
+        Settings settings_write("cloud", true);
+        settings_write.SetString("alarm_url", "http://192.168.3.30:3000");
+        settings_write.SetString("alarm_token", "CslgYskrXQPVBLLLdxHYHzRG9WyZVKyU");
+        settings_write.SetInt("alarm_interval", 60);
+        ESP_LOGI(TAG, "Cloud sync config saved to NVS");
+        cloud_url = "http://192.168.3.30:3000";
+    }
+    
+    std::string token = settings.GetString("alarm_token");
+    int sync_interval = settings.GetInt("alarm_interval", 300);
+    
+    if (!cloud_url.empty()) {
+        std::string device_id = Board::GetInstance().GetUuid();
+        auto& sync = AlarmCloudSync::GetInstance();
+        sync.Initialize(cloud_url, device_id, token);
+        sync.SetSyncInterval(sync_interval);
+        sync.StartAutoSync();
+        
+        ESP_LOGI(TAG, "Alarm cloud sync enabled: url=%s, device=%s, interval=%ds", 
+                 cloud_url.c_str(), device_id.c_str(), sync_interval);
+        
+        sync.FullSync(nullptr);
+    } else {
+        ESP_LOGI(TAG, "Alarm cloud sync not configured");
+    }
+}
+
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
     struct digit_sound {
         char digit;
@@ -774,6 +834,8 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    StopAlarmRing();
+    
     if (!protocol_) {
         return;
     }
@@ -1104,6 +1166,53 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
+}
+
+void Application::StartAlarmRing(const std::string& name) {
+    if (alarm_ringing_) {
+        return;
+    }
+    
+    alarm_ringing_ = true;
+    alarm_name_ = name;
+    
+    PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+    Alert("alarm", name.c_str(), "happy");
+    
+    esp_timer_create_args_t timer_args = {
+        .callback = [](void* arg) {
+            Application* app = static_cast<Application*>(arg);
+            if (app->alarm_ringing_) {
+                app->PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+            }
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "alarm_ring_timer"
+    };
+    
+    esp_timer_create(&timer_args, &alarm_ring_timer_);
+    esp_timer_start_periodic(alarm_ring_timer_, 3000000);
+    
+    ESP_LOGI(TAG, "Alarm ringing started: %s", name.c_str());
+}
+
+void Application::StopAlarmRing() {
+    if (!alarm_ringing_) {
+        return;
+    }
+    
+    alarm_ringing_ = false;
+    
+    if (alarm_ring_timer_) {
+        esp_timer_stop(alarm_ring_timer_);
+        esp_timer_delete(alarm_ring_timer_);
+        alarm_ring_timer_ = nullptr;
+    }
+    
+    DismissAlert();
+    
+    ESP_LOGI(TAG, "Alarm ringing stopped");
 }
 
 void Application::ResetProtocol() {

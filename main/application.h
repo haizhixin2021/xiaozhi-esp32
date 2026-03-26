@@ -111,6 +111,8 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
+    void StartAlarmRing(const std::string& name);
+    void StopAlarmRing();
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
@@ -143,6 +145,10 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
+    bool alarm_ringing_ = false;
+    esp_timer_handle_t alarm_ring_timer_ = nullptr;
+    std::string alarm_name_;
+
 
     // Event handlers
     void HandleStateChangedEvent();
@@ -163,6 +169,7 @@ private:
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    void InitializeAlarmCloudSync();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;

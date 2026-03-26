@@ -17,6 +17,8 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "alarm_clock.h"
+#include "alarm_cloud_sync.h"
 
 #define TAG "MCP"
 
@@ -121,8 +123,197 @@ void McpServer::AddCommonTools() {
     }
 #endif
 
+    AddAlarmTools();
+
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
+}
+
+void McpServer::AddAlarmTools() {
+    AddTool("self.alarm.add",
+        "Add a new alarm. Supports three modes:\n"
+        "1. Countdown mode: Set delay seconds to trigger after a delay\n"
+        "2. Scheduled mode: Set hour and minute to trigger at a specific time\n"
+        "3. Repeating mode: Set repeat count and interval for recurring alarms\n"
+        "Priority: hour/minute > delay. If both are provided, hour/minute takes precedence.\n"
+        "Args:\n"
+        "  `name`: The alarm name or reminder content (required)\n"
+        "  `delay`: Delay in seconds for countdown mode (optional, default 60)\n"
+        "  `hour`: Hour (0-23) for scheduled mode, use 255 if not specified (optional, default 255)\n"
+        "  `minute`: Minute (0-59) for scheduled mode, use 255 if not specified (optional, default 255)\n"
+        "  `repeat`: Repeat count, 1 for one-time, -1 for infinite, default 1 (optional)\n"
+        "  `interval`: Interval in seconds between repeats, default 86400 (24 hours) (optional)\n"
+        "Return:\n"
+        "  A JSON object with alarm details including id and trigger time.",
+        PropertyList({
+            Property("name", kPropertyTypeString),
+            Property("delay", kPropertyTypeInteger, 60, 1, 86400 * 365),
+            Property("hour", kPropertyTypeInteger, 255, 0, 255),
+            Property("minute", kPropertyTypeInteger, 255, 0, 255),
+            Property("repeat", kPropertyTypeInteger, 1, -1, 10000),
+            Property("interval", kPropertyTypeInteger, 86400, 1, 86400 * 365)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto name = properties["name"].value<std::string>();
+            int delay = properties["delay"].value<int>();
+            int hour = properties["hour"].value<int>();
+            int minute = properties["minute"].value<int>();
+            int repeat = properties["repeat"].value<int>();
+            int interval = properties["interval"].value<int>();
+
+            if (hour == 255) hour = -1;
+            if (minute == 255) minute = -1;
+
+            auto& manager = AlarmManager::GetInstance();
+            Alarm alarm = manager.AddAlarm(name, delay, hour, minute, repeat, interval);
+            
+            cJSON* json = alarm.ToCjson();
+            char time_str[32];
+            struct tm* tm_info = localtime(&alarm.trigger_time);
+            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+            cJSON_AddStringToObject(json, "trigger_time_str", time_str);
+            cJSON_AddStringToObject(json, "message", "Alarm added successfully");
+            return json;
+        });
+
+    AddTool("self.alarm.list",
+        "Get all alarms list.\n"
+        "Return:\n"
+        "  A JSON object with alarms array and total count.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& manager = AlarmManager::GetInstance();
+            std::string json_str = manager.GetAlarmsJson();
+            cJSON* json = cJSON_Parse(json_str.c_str());
+            return json;
+        });
+
+    AddTool("self.alarm.delete",
+        "Delete an alarm by ID.\n"
+        "Args:\n"
+        "  `id`: The alarm ID to delete (required)\n"
+        "Return:\n"
+        "  A JSON object with success status.",
+        PropertyList({
+            Property("id", kPropertyTypeInteger, 1, 1, 999999)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            uint32_t id = (uint32_t)properties["id"].value<int>();
+            auto& manager = AlarmManager::GetInstance();
+            bool success = manager.RemoveAlarm(id);
+            
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "success", success);
+            cJSON_AddStringToObject(json, "message", success ? "Alarm deleted" : "Alarm not found");
+            return json;
+        });
+
+    AddTool("self.alarm.update",
+        "Update an existing alarm.\n"
+        "Args:\n"
+        "  `id`: The alarm ID to update (required)\n"
+        "  `name`: New alarm name (optional)\n"
+        "  `hour`: New hour (0-23) (optional)\n"
+        "  `minute`: New minute (0-59) (optional)\n"
+        "  `repeat`: New repeat count (optional)\n"
+        "  `interval`: New interval in seconds (optional)\n"
+        "Return:\n"
+        "  A JSON object with success status.",
+        PropertyList({
+            Property("id", kPropertyTypeInteger, 1, 1, 999999),
+            Property("name", kPropertyTypeString, ""),
+            Property("hour", kPropertyTypeInteger, 255, 0, 255),
+            Property("minute", kPropertyTypeInteger, 255, 0, 255),
+            Property("repeat", kPropertyTypeInteger, -2, -2, 10000),
+            Property("interval", kPropertyTypeInteger, 0, 0, 86400 * 365)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            uint32_t id = (uint32_t)properties["id"].value<int>();
+            auto name = properties["name"].value<std::string>();
+            int hour = properties["hour"].value<int>();
+            int minute = properties["minute"].value<int>();
+            int repeat = properties["repeat"].value<int>();
+            int interval = properties["interval"].value<int>();
+
+            if (hour == 255) hour = -1;
+            if (minute == 255) minute = -1;
+            if (repeat == -2) repeat = 0;
+
+            auto& manager = AlarmManager::GetInstance();
+            bool success = manager.UpdateAlarm(id, name, hour, minute, repeat, interval);
+            
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "success", success);
+            cJSON_AddStringToObject(json, "message", success ? "Alarm updated" : "Alarm not found");
+            return json;
+        });
+
+    AddTool("self.alarm.clear",
+        "Clear all alarms.\n"
+        "Return:\n"
+        "  A JSON object with success status.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& manager = AlarmManager::GetInstance();
+            bool success = manager.ClearAllAlarms();
+            
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "success", success);
+            cJSON_AddStringToObject(json, "message", "All alarms cleared");
+            return json;
+        });
+
+    AddTool("self.alarm.stop_ring",
+        "Stop the alarm ring sound.\n"
+        "Return:\n"
+        "  A JSON object with success status.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            app.StopAlarmRing();
+            
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "success", true);
+            cJSON_AddStringToObject(json, "message", "Alarm ring stopped");
+            return json;
+        });
+
+        // 新增：云端同步工具
+    AddTool("self.alarm.sync_cloud",
+        "Sync alarms with cloud server.\n"
+        "Args:\n"
+        "  `direction`: Sync direction - 'to_cloud', 'from_cloud', or 'full' (default: 'full')\n"
+        "Return:\n"
+        "  A JSON object with sync result.",
+        PropertyList({
+            Property("direction", kPropertyTypeString, "full")
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto direction = properties["direction"].value<std::string>();
+            auto& sync = AlarmCloudSync::GetInstance();
+            
+            cJSON* json = cJSON_CreateObject();
+            
+            if (direction == "to_cloud") {
+                sync.SyncToCloud([](bool success, const std::string& msg) {
+                    ESP_LOGI(TAG, "Sync to cloud: %s", msg.c_str());
+                });
+                cJSON_AddStringToObject(json, "message", "Sync to cloud initiated");
+            } else if (direction == "from_cloud") {
+                sync.SyncFromCloud([](bool success, const std::string& msg) {
+                    ESP_LOGI(TAG, "Sync from cloud: %s", msg.c_str());
+                });
+                cJSON_AddStringToObject(json, "message", "Sync from cloud initiated");
+            } else {
+                sync.FullSync([](bool success, const std::string& msg) {
+                    ESP_LOGI(TAG, "Full sync: %s", msg.c_str());
+                });
+                cJSON_AddStringToObject(json, "message", "Full sync initiated");
+            }
+            
+            cJSON_AddBoolToObject(json, "success", true);
+            return json;
+        });
 }
 
 void McpServer::AddUserOnlyTools() {
