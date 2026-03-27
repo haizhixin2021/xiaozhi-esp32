@@ -9,6 +9,8 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "adc_battery_monitor.h"
+#include "power_save_timer.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -62,10 +64,11 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 
 class CompactWifiBoardS3Cam : public WifiBoard {
 private:
- 
+
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+    PowerSaveTimer* power_save_timer_;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -165,6 +168,24 @@ private:
         });
     }
 
+    void InitializePowerSaveTimer() {
+        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        power_save_timer_->OnEnterSleepMode([this]() {
+            ESP_LOGI(TAG, "Entering sleep mode, setting brightness to 0");
+            GetBacklight()->SetBrightness(0);
+        });
+        power_save_timer_->OnExitSleepMode([this]() {
+            ESP_LOGI(TAG, "Exiting sleep mode, restoring brightness");
+            GetBacklight()->RestoreBrightness();
+        });
+        power_save_timer_->OnShutdownRequest([this]() {
+            ESP_LOGI(TAG, "Shutdown request, setting brightness to 0");
+            GetBacklight()->SetBrightness(0);
+        });
+        power_save_timer_->SetEnabled(true);
+    }
+
+
 public:
     CompactWifiBoardS3Cam() :
         boot_button_(BOOT_BUTTON_GPIO) {
@@ -172,10 +193,12 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        // InitializeBatteryMonitor(); // Disabled to hide battery icon
+        InitializePowerSaveTimer();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
-        
+
     }
 
     virtual Led* GetLed() override {
@@ -208,6 +231,34 @@ public:
 
     virtual Camera* GetCamera() override {
         return camera_;
+    }
+
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        // Return false to hide battery icon
+        return false;
+    }
+
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        ESP_LOGI(TAG, "SetPowerSaveLevel called, level=%d", (int)level);
+        if (level != PowerSaveLevel::LOW_POWER) {
+            ESP_LOGI(TAG, "Waking up from power save, restoring brightness");
+            power_save_timer_->WakeUp();
+            // Always restore brightness when waking up, even if not in sleep mode
+            // This handles the case where screen was turned off by voice command
+            auto backlight = GetBacklight();
+            ESP_LOGI(TAG, "GetBacklight() returned: %p", backlight);
+            if (backlight) {
+                ESP_LOGI(TAG, "Current brightness: %d", backlight->brightness());
+                // Always call RestoreBrightness when waking up to ensure screen is on
+                // This handles both sleep mode and voice-command-off cases
+                ESP_LOGI(TAG, "Restoring brightness");
+                backlight->RestoreBrightness();
+                ESP_LOGI(TAG, "Brightness restored to: %d", backlight->brightness());
+            } else {
+                ESP_LOGW(TAG, "GetBacklight() returned nullptr!");
+            }
+        }
+        WifiBoard::SetPowerSaveLevel(level);
     }
 };
 

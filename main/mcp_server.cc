@@ -326,6 +326,28 @@ void McpServer::AddUserOnlyTools() {
             return board.GetSystemInfoJson();
         });
 
+    AddTool("self.stop_conversation",
+        "Stop the current conversation and return to standby mode. Use this when the user says 'stop', 'close', 'goodbye', or wants to end the conversation.",
+        PropertyList(),
+        [this](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            auto state = app.GetDeviceState();
+            
+            ESP_LOGI(TAG, "Stop conversation requested, current state: %d", (int)state);
+            
+            if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+                app.Schedule([&app]() {
+                    ESP_LOGI(TAG, "Stopping conversation and returning to standby");
+                    app.ToggleChatState();
+                });
+                return "{\"success\": true, \"message\": \"Conversation stopped, returning to standby\"}";
+            } else if (state == kDeviceStateIdle) {
+                return "{\"success\": true, \"message\": \"Already in standby mode\"}";
+            } else {
+                return "{\"success\": false, \"message\": \"Cannot stop conversation in current state\"}";
+            }
+        });
+
     AddUserOnlyTool("self.reboot", "Reboot the system",
         PropertyList(),
         [this](const PropertyList& properties) -> ReturnValue {

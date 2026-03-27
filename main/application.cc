@@ -895,6 +895,11 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+    
+    // Wake up from power save mode to restore brightness
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
     while (auto packet = audio_service_.PopWakeWordPacket()) {
