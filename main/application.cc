@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "alarm_clock.h"
 #include "alarm_cloud_sync.h"
+#include "music_player.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -74,6 +75,9 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
+
+    // Initialize music player
+    music_player_ = std::make_unique<MusicPlayer>(audio_service_);
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -641,13 +645,15 @@ void Application::InitializeAlarmCloudSync() {
     Settings settings("cloud", false);
     std::string cloud_url = settings.GetString("alarm_url");
     
+    ESP_LOGI(TAG, "Read alarm_url from NVS: '%s'", cloud_url.c_str());
+    
     if (cloud_url.empty()) {
         Settings settings_write("cloud", true);
-        settings_write.SetString("alarm_url", "http://192.168.3.30:3000");
+        settings_write.SetString("alarm_url", "https://mcp.880219.xyz:44578");
         settings_write.SetString("alarm_token", "CslgYskrXQPVBLLLdxHYHzRG9WyZVKyU");
-        settings_write.SetInt("alarm_interval", 60);
+        settings_write.SetInt("alarm_interval", 300);
         ESP_LOGI(TAG, "Cloud sync config saved to NVS");
-        cloud_url = "http://192.168.3.30:3000";
+        cloud_url = "https://mcp.880219.xyz:44578";
     }
     
     std::string token = settings.GetString("alarm_token");
@@ -835,6 +841,13 @@ void Application::HandleStopListeningEvent() {
 
 void Application::HandleWakeWordDetectedEvent() {
     StopAlarmRing();
+    
+    // 停止音乐播放
+    if (music_player_ && music_player_->IsPlaying()) {
+        ESP_LOGI(TAG, "Stopping music streaming due to wake word detected");
+        music_player_->StopStreaming();
+        audio_service_.ResetDecoder();
+    }
     
     if (!protocol_) {
         return;
@@ -1129,6 +1142,11 @@ bool Application::CanEnterSleepMode() {
         return false;
     }
 
+    auto music = Board::GetInstance().GetMusic();
+    if (music && music->IsPlaying()) {
+        return false;
+    }
+
     // Now it is safe to enter sleep mode
     return true;
 }
@@ -1229,5 +1247,171 @@ void Application::ResetProtocol() {
         // Reset protocol
         protocol_.reset();
     });
+}
+
+bool Application::PlayMusic(const std::string& song_name, const std::string& singer) {
+    if (!music_player_) {
+        ESP_LOGE(TAG, "Music player not initialized");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Playing music: %s - %s", song_name.c_str(), singer.c_str());
+    return music_player_->Download(song_name, singer);
+}
+
+void Application::StopMusic() {
+    if (music_player_) {
+        music_player_->StopStreaming();
+    }
+}
+
+bool Application::IsMusicPlaying() const {
+    if (music_player_) {
+        return music_player_->IsPlaying();
+    }
+    return false;
+}
+
+void Application::PauseMusic() {
+    if (music_player_) {
+        music_player_->Pause();
+    }
+}
+
+void Application::ResumeMusic() {
+    if (music_player_) {
+        music_player_->Resume();
+    }
+}
+
+bool Application::IsMusicPaused() const {
+    if (music_player_) {
+        return music_player_->IsPaused();
+    }
+    return false;
+}
+
+// 新增：接收外部音频数据（如音乐播放）
+void Application::AddAudioData(AudioStreamPacket &&packet)
+{
+    auto codec = Board::GetInstance().GetAudioCodec();
+    auto state = GetDeviceState();
+    if (state == kDeviceStateIdle && codec->output_enabled())
+    {
+        // packet.payload包含的是原始PCM数据（int16_t）
+        if (packet.payload.size() >= 2)
+        {
+            size_t num_samples = packet.payload.size() / sizeof(int16_t);
+            std::vector<int16_t> pcm_data(num_samples);
+            memcpy(pcm_data.data(), packet.payload.data(), packet.payload.size());
+
+            // 检查采样率是否匹配，如果不匹配则进行简单重采样
+            if (packet.sample_rate != codec->output_sample_rate())
+            {
+                // ESP_LOGI(TAG, "Resampling music audio from %d to %d Hz",
+                //         packet.sample_rate, codec->output_sample_rate());
+
+                // 验证采样率参数
+                if (packet.sample_rate <= 0 || codec->output_sample_rate() <= 0)
+                {
+                    ESP_LOGE(TAG, "Invalid sample rates: %d -> %d",
+                             packet.sample_rate, codec->output_sample_rate());
+                    return;
+                }
+
+                std::vector<int16_t> resampled;
+
+                if (packet.sample_rate > codec->output_sample_rate())
+                {
+                    ESP_LOGI(TAG, "Music Player: Adjust the sampling rate from %d Hz to %d Hz",
+                             codec->output_sample_rate(), packet.sample_rate);
+
+                    // 尝试动态切换采样率
+                    if (codec->SetOutputSampleRate(packet.sample_rate))
+                    {
+                        ESP_LOGI(TAG, "Successfully switched to music playback sampling rate: %d Hz", packet.sample_rate);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Unable to switch sampling rate, continue using current sampling rate: %d Hz", codec->output_sample_rate());
+                    }
+                }
+                else
+                {
+                    if (packet.sample_rate > codec->output_sample_rate())
+                    {
+                        // 下采样：简单丢弃部分样本
+                        float downsample_ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
+                        size_t expected_size = static_cast<size_t>(pcm_data.size() / downsample_ratio + 0.5f);
+                        std::vector<int16_t> resampled(expected_size);
+                        size_t resampled_index = 0;
+
+                        for (size_t i = 0; i < pcm_data.size(); ++i)
+                        {
+                            if (i % static_cast<size_t>(downsample_ratio) == 0)
+                            {
+                                resampled[resampled_index++] = pcm_data[i];
+                            }
+                        }
+
+                        pcm_data = std::move(resampled);
+                        ESP_LOGI(TAG, "Downsampled %d -> %d samples (ratio: %.2f)",
+                                 pcm_data.size(), resampled.size(), downsample_ratio);
+                    }
+                    else if (packet.sample_rate < codec->output_sample_rate())
+                    {
+                        // 上采样：线性插值
+                        float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
+                        size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
+                        resampled.reserve(expected_size);
+
+                        for (size_t i = 0; i < pcm_data.size(); ++i)
+                        {
+                            // 添加原始样本
+                            resampled.push_back(pcm_data[i]);
+
+                            // 计算需要插值的样本数
+                            int interpolation_count = static_cast<int>(upsample_ratio) - 1;
+                            if (interpolation_count > 0 && i + 1 < pcm_data.size())
+                            {
+                                int16_t current = pcm_data[i];
+                                int16_t next = pcm_data[i + 1];
+                                for (int j = 1; j <= interpolation_count; ++j)
+                                {
+                                    float t = static_cast<float>(j) / (interpolation_count + 1);
+                                    int16_t interpolated = static_cast<int16_t>(current + (next - current) * t);
+                                    resampled.push_back(interpolated);
+                                }
+                            }
+                            else if (interpolation_count > 0)
+                            {
+                                // 最后一个样本，直接重复
+                                for (int j = 1; j <= interpolation_count; ++j)
+                                {
+                                    resampled.push_back(pcm_data[i]);
+                                }
+                            }
+                        }
+
+                        ESP_LOGI(TAG, "Upsampled %d -> %d samples (ratio: %.2f)",
+                                 pcm_data.size(), resampled.size(), upsample_ratio);
+                    }
+                }
+
+                pcm_data = std::move(resampled);
+            }
+
+            // 确保音频输出已启用
+            if (!codec->output_enabled())
+            {
+                codec->EnableOutput(true);
+            }
+
+            // 发送PCM数据到音频编解码器
+            codec->OutputData(pcm_data);
+
+            audio_service_.UpdateOutputTimestamp();
+        }
+    }
 }
 

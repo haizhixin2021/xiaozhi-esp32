@@ -184,9 +184,11 @@ void AlarmCloudSync::FullSync(SyncCallback callback) {
 bool AlarmCloudSync::SendRequest(const std::string& method, const std::string& path,
                                   const std::string& body, std::string& response) {
     auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(10);
+    auto http = network->CreateHttp(30);  // 增加超时到 30 秒
     
     std::string url = server_url_ + path;
+    
+    ESP_LOGI(TAG, "Sending %s request to %s", method.c_str(), url.c_str());
     
     if (!token_.empty()) {
         std::string auth = token_;
@@ -197,18 +199,20 @@ bool AlarmCloudSync::SendRequest(const std::string& method, const std::string& p
     }
     http->SetHeader("Content-Type", "application/json");
     http->SetHeader("Device-Id", device_id_.c_str());
+    http->SetHeader("User-Agent", "ESP32-AlarmSync/1.0");
+    
+    if (!body.empty()) {
+        http->SetContent(std::string(body));
+    }
     
     if (!http->Open(method.c_str(), url)) {
         ESP_LOGE(TAG, "Failed to connect to %s", url.c_str());
         return false;
     }
     
-    if (!body.empty()) {
-        http->Write(body.c_str(), body.size());
-    }
-    http->Write("", 0);
-    
     int status = http->GetStatusCode();
+    ESP_LOGI(TAG, "HTTP status: %d", status);
+    
     if (status != 200 && status != 201) {
         ESP_LOGE(TAG, "HTTP error: %d, url: %s", status, url.c_str());
         std::string resp = http->ReadAll();

@@ -36,6 +36,7 @@ set(SOURCES "audio/audio_codec.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "music_player.cc"
             "main.cc"
             )
 
@@ -62,6 +63,7 @@ list(APPEND SOURCES
     "boards/common/system_reset.cc"
     "boards/common/alarm_clock.cc"
     "boards/common/alarm_cloud_sync.cc"
+    "boards/common/esp32_music.cc"
 )
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/common)
 
@@ -937,6 +939,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        esp_http_client
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME

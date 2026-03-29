@@ -169,7 +169,7 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        power_save_timer_ = new PowerSaveTimer(-1, 300, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
             ESP_LOGI(TAG, "Entering sleep mode, setting brightness to 0");
             GetBacklight()->SetBrightness(0);

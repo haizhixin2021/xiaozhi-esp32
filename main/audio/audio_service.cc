@@ -653,6 +653,78 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     demuxer->Process(buf, size);
 }
 
+void AudioService::PlayPcmData(std::vector<int16_t>&& pcm, int sample_rate) {
+    if (!codec_->output_enabled()) {
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        codec_->EnableOutput(true);
+    }
+    
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task->pcm = std::move(pcm);
+    task->timestamp = 0;
+    
+    // 如果采样率与输出不同，需要重采样
+    if (sample_rate != codec_->output_sample_rate() && output_resampler_ != nullptr) {
+        uint32_t target_size = 0;
+        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task->pcm.size(), &target_size);
+        std::vector<int16_t> resampled(target_size);
+        uint32_t actual_output = target_size;
+        esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task->pcm.data(), task->pcm.size(),
+                                (esp_ae_sample_t)resampled.data(), &actual_output);
+        resampled.resize(actual_output);
+        task->pcm = std::move(resampled);
+    }
+    
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_playback_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+}
+
+void AudioService::PlayPcmData(std::vector<int16_t>&& pcm, int sample_rate, int channels) {
+    if (!codec_->output_enabled()) {
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        codec_->EnableOutput(true);
+    }
+    
+    // 如果是立体声，转换为单声道
+    if (channels == 2 && pcm.size() >= 2) {
+        // 确保样本数是偶数
+        size_t stereo_samples = (pcm.size() / 2) * 2;
+        std::vector<int16_t> mono;
+        mono.reserve(stereo_samples / 2);
+        for (size_t i = 0; i < stereo_samples; i += 2) {
+            // 取左右声道的平均值
+            int32_t sum = (int32_t)pcm[i] + (int32_t)pcm[i + 1];
+            mono.push_back((int16_t)(sum / 2));
+        }
+        pcm = std::move(mono);
+    }
+    
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task->pcm = std::move(pcm);
+    task->timestamp = 0;
+    
+    // 如果采样率与输出不同，需要重采样
+    if (sample_rate != codec_->output_sample_rate() && output_resampler_ != nullptr) {
+        uint32_t target_size = 0;
+        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task->pcm.size(), &target_size);
+        std::vector<int16_t> resampled(target_size);
+        uint32_t actual_output = target_size;
+        esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task->pcm.data(), task->pcm.size(),
+                                (esp_ae_sample_t)resampled.data(), &actual_output);
+        resampled.resize(actual_output);
+        task->pcm = std::move(resampled);
+    }
+    
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_playback_queue_.push_back(std::move(task));
+    audio_queue_cv_.notify_all();
+}
+
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
@@ -731,4 +803,9 @@ bool AudioService::IsAfeWakeWord() {
 #else
     return false;
 #endif
+}
+
+
+void AudioService::UpdateOutputTimestamp() {
+    last_output_time_ = std::chrono::steady_clock::now();
 }

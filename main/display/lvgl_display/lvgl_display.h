@@ -24,6 +24,7 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);
+    virtual void SetMusicInfo(const char* song_name) override;
 
 protected:
     esp_pm_lock_handle_t pm_lock_ = nullptr;
@@ -36,6 +37,8 @@ protected:
     lv_obj_t *battery_label_ = nullptr;
     lv_obj_t* low_battery_popup_ = nullptr;
     lv_obj_t* low_battery_label_ = nullptr;
+
+    lv_obj_t* chat_message_label_ = nullptr;
     
     const char* battery_icon_ = nullptr;
     const char* network_icon_ = nullptr;

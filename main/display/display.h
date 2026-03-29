@@ -40,6 +40,10 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual void SetMusicInfo(const char* song_name);
+    virtual void startFft();
+    virtual void stopFft();
+    virtual void clearScreen();
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }

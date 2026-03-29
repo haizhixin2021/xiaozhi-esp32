@@ -13,6 +13,7 @@
 #include "backlight.h"
 #include "camera.h"
 #include "assets.h"
+#include "music.h"
 
 /**
  * Network events for unified callback
@@ -58,13 +59,16 @@ protected:
     // 软件生成的设备唯一标识
     std::string uuid_;
 
+    // 音乐播放器实例
+    Music* music_;
+
 public:
     static Board& GetInstance() {
         static Board* instance = static_cast<Board*>(create_board());
         return *instance;
     }
 
-    virtual ~Board() = default;
+    virtual ~Board();  // 改为非默认析构函数，用于清理 music_
     virtual std::string GetBoardType() = 0;
     virtual std::string GetUuid() { return uuid_; }
     virtual Backlight* GetBacklight() { return nullptr; }
@@ -73,6 +77,7 @@ public:
     virtual bool GetTemperature(float& esp32temp);
     virtual Display* GetDisplay();
     virtual Camera* GetCamera();
+    virtual Music* GetMusic();
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }

@@ -113,6 +113,8 @@ public:
     void PlaySound(const std::string_view& sound);
     void StartAlarmRing(const std::string& name);
     void StopAlarmRing();
+    // 新增：接收外部音频数据（如音乐播放）
+    void AddAudioData(AudioStreamPacket&& packet);
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
@@ -121,6 +123,14 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
+
+    // 音乐播放相关方法
+    bool PlayMusic(const std::string& song_name, const std::string& singer = "");
+    void StopMusic();
+    void PauseMusic();
+    void ResumeMusic();
+    bool IsMusicPlaying() const;
+    bool IsMusicPaused() const;
 
 private:
     Application();
@@ -137,6 +147,7 @@ private:
     std::string last_error_message_;
     AudioService audio_service_;
     std::unique_ptr<Ota> ota_;
+    std::unique_ptr<class MusicPlayer> music_player_;
 
     bool has_server_time_ = false;
     bool aborted_ = false;

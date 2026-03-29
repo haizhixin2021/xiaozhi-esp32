@@ -58,3 +58,19 @@ void Display::SetTheme(Theme* theme) {
 void Display::SetPowerSaveMode(bool on) {
     ESP_LOGW(TAG, "SetPowerSaveMode: %d", on);
 }
+
+void Display::SetMusicInfo(const char* song_name) {
+    // Default empty implementation, override in subclasses if needed
+}
+
+void Display::startFft() { 
+    // Default empty implementation, override in subclasses if needed
+}
+
+void Display::stopFft() {
+    // Default empty implementation, override in subclasses if needed
+}
+
+void Display::clearScreen() {
+    // Default empty implementation, override in subclasses if needed
+}
