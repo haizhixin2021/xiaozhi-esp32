@@ -645,8 +645,6 @@ void Application::InitializeAlarmCloudSync() {
     Settings settings("cloud", false);
     std::string cloud_url = settings.GetString("alarm_url");
     
-    ESP_LOGI(TAG, "Read alarm_url from NVS: '%s'", cloud_url.c_str());
-    
     if (cloud_url.empty()) {
         Settings settings_write("cloud", true);
         settings_write.SetString("alarm_url", "https://mcp.880219.xyz:44578");

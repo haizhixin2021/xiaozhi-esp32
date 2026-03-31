@@ -109,7 +109,9 @@ public:
     DisplayMode GetDisplayMode() const { return display_mode_.load(); }
 
     // MCP服务地址
-    static constexpr const char* MCP_SERVICE_URL = "https://music-mcp.880219.xyz:57860/mcp";
+    //static constexpr const char* MCP_SERVICE_URL = "http://music-mcp.880219.xyz:57860/mcp";
+    static constexpr const char* MCP_SERVICE_URL = "http://47.93.61.35:57860/mcp";
+
     // MCP服务认证令牌
     static constexpr const char* MCP_AUTH_TOKEN = "44bab3db2734ea21b73cdd5445a93b8e762d77db7a9cbdcce9e1b52d741fa55f";
 
