@@ -814,6 +814,31 @@ void Esp32Music::DownloadAudioStream(const std::string &music_url)
             {
                 ESP_LOGI(TAG, "Detected OGG file");
             }
+            else if (bytes_read >= 12 && memcmp(buffer + 4, "ftyp", 4) == 0)
+            {
+                ESP_LOGE(TAG, "Detected M4A/AAC file - NOT SUPPORTED! Only MP3 format is supported");
+                http->Close();
+                is_downloading_ = false;
+                is_playing_ = false;
+                return;
+            }
+            else if (bytes_read >= 2 && buffer[0] == 0xFF && (buffer[1] & 0xF0) == 0xF0)
+            {
+                ESP_LOGE(TAG, "Detected AAC ADTS file - NOT SUPPORTED! Only MP3 format is supported");
+                http->Close();
+                is_downloading_ = false;
+                is_playing_ = false;
+                return;
+            }
+            else if (buffer[0] == '{')
+            {
+                ESP_LOGE(TAG, "Received JSON response instead of audio data, URL may be invalid");
+                ESP_LOGE(TAG, "Response preview: %.*s", bytes_read > 200 ? 200 : bytes_read, buffer);
+                http->Close();
+                is_downloading_ = false;
+                is_playing_ = false;
+                return;
+            }
             else
             {
                 ESP_LOGI(TAG, "Unknown audio format, first 4 bytes: %02X %02X %02X %02X",
@@ -922,6 +947,10 @@ void Esp32Music::PlayAudioStream()
 
     // 标记是否已经处理过ID3标签
     bool id3_processed = false;
+
+    // 连续解码失败计数器
+    int consecutive_decode_failures = 0;
+    const int max_consecutive_failures = 50;
 
     while (is_playing_)
     {
@@ -1055,10 +1084,22 @@ void Esp32Music::PlayAudioStream()
         int sync_offset = MP3FindSyncWord(read_ptr, bytes_left);
         if (sync_offset < 0)
         {
-            ESP_LOGW(TAG, "No MP3 sync word found, skipping %d bytes", bytes_left);
+            consecutive_decode_failures++;
+            ESP_LOGW(TAG, "No MP3 sync word found, skipping %d bytes (failures: %d/%d)", 
+                     bytes_left, consecutive_decode_failures, max_consecutive_failures);
+            
+            if (consecutive_decode_failures >= max_consecutive_failures)
+            {
+                ESP_LOGE(TAG, "Too many sync failures, stopping playback");
+                break;
+            }
+            
             bytes_left = 0;
             continue;
         }
+
+        // 找到同步字，重置失败计数器
+        consecutive_decode_failures = 0;
 
         // 跳过到同步位置
         if (sync_offset > 0)
@@ -1073,6 +1114,9 @@ void Esp32Music::PlayAudioStream()
 
         if (decode_result == 0)
         {
+            // 解码成功，重置失败计数器
+            consecutive_decode_failures = 0;
+
             // 解码成功，获取帧信息
             MP3GetLastFrameInfo(mp3_decoder_, &mp3_frame_info_);
             total_frames_decoded_++;
@@ -1184,7 +1228,16 @@ void Esp32Music::PlayAudioStream()
         else
         {
             // 解码失败
-            ESP_LOGW(TAG, "MP3 decode failed with error: %d", decode_result);
+            consecutive_decode_failures++;
+            ESP_LOGW(TAG, "MP3 decode failed with error: %d (consecutive failures: %d/%d)", 
+                     decode_result, consecutive_decode_failures, max_consecutive_failures);
+
+            // 检查是否超过最大连续失败次数
+            if (consecutive_decode_failures >= max_consecutive_failures)
+            {
+                ESP_LOGE(TAG, "Too many consecutive decode failures, stopping playback");
+                break;
+            }
 
             // 跳过一些字节继续尝试
             if (bytes_left > 1)
@@ -1499,6 +1552,30 @@ bool Esp32Music::DownloadLyrics(const std::string &lyric_url)
     }
 
     ESP_LOGI(TAG, "Lyrics downloaded successfully, size: %d bytes", lyric_content.length());
+
+    // 检查是否是JSON格式的响应
+    if (!lyric_content.empty() && lyric_content[0] == '{') {
+        // 尝试解析JSON格式: {"code":200,"msg":"success","data":{"lyric":"..."}}
+        cJSON* json = cJSON_Parse(lyric_content.c_str());
+        if (json) {
+            cJSON* code = cJSON_GetObjectItem(json, "code");
+            if (code && cJSON_IsNumber(code) && code->valueint == 200) {
+                cJSON* data = cJSON_GetObjectItem(json, "data");
+                if (data) {
+                    cJSON* lyric = cJSON_GetObjectItem(data, "lyric");
+                    if (lyric && cJSON_IsString(lyric)) {
+                        ESP_LOGI(TAG, "Extracted lyric from JSON response");
+                        std::string extracted_lyric = lyric->valuestring;
+                        cJSON_Delete(json);
+                        return ParseLyrics(extracted_lyric);
+                    }
+                }
+            }
+            cJSON_Delete(json);
+        }
+        ESP_LOGW(TAG, "Failed to parse JSON lyric response, trying raw content");
+    }
+
     return ParseLyrics(lyric_content);
 }
 
