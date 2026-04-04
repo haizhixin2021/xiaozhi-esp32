@@ -69,6 +69,7 @@ private:
     LcdDisplay* display_;
     Esp32Camera* camera_;
     PowerSaveTimer* power_save_timer_;
+    AdcBatteryMonitor* battery_monitor_ = nullptr;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -185,6 +186,45 @@ private:
         power_save_timer_->SetEnabled(true);
     }
 
+    void InitializeBatteryMonitor() {
+        adc_unit_t adc_unit = ADC_UNIT_2; // GPIO14 属于 ADC2
+        
+        // 电池电压-电量对照表（根据锂电池放电曲线，增加采样点提高精度）
+        static const battery_point_t battery_points[] = {
+            { 4.20, 100 },  // 满电
+            { 4.15, 95 },   // 
+            { 4.10, 90 },   // 很高
+            { 4.05, 85 },   // 
+            { 4.00, 80 },   // 高电量
+            { 3.95, 75 },   // 
+            { 3.90, 70 },   // 高
+            { 3.85, 65 },   // 
+            { 3.80, 55 },   // 中等电量
+            { 3.75, 50 },   // 
+            { 3.70, 45 },   // 中低
+            { 3.65, 40 },   // 
+            { 3.60, 35 },   // 
+            { 3.55, 30 },   // 中低电量
+            { 3.50, 25 },   // 
+            { 3.45, 20 },   // 低电量
+            { 3.40, 15 },   // 
+            { 3.35, 10 },   // 
+            { 3.30, 5 },    // 即将关机
+            { 3.20, 0 }     // 关机
+        };
+        
+        battery_monitor_ = new AdcBatteryMonitor(
+            adc_unit,
+            BATTERY_ADC_CHANNEL,
+            BATTERY_UPPER_RESISTOR,
+            BATTERY_LOWER_RESISTOR,
+            CHARGING_STATUS_GPIO,
+            CHARGING_STATUS_ACTIVE_LEVEL,
+            battery_points,
+            sizeof(battery_points) / sizeof(battery_points[0])
+        );
+    }
+
 
 public:
     CompactWifiBoardS3Cam() :
@@ -193,7 +233,7 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
-        // InitializeBatteryMonitor(); // Disabled to hide battery icon
+        InitializeBatteryMonitor();
         InitializePowerSaveTimer();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
@@ -234,8 +274,15 @@ public:
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
-        // Return false to hide battery icon
-        return false;
+        if (battery_monitor_ == nullptr) {
+            return false;
+        }
+        
+        level = battery_monitor_->GetBatteryLevel();
+        charging = battery_monitor_->IsCharging();
+        discharging = battery_monitor_->IsDischarging();
+        
+        return true;
     }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {

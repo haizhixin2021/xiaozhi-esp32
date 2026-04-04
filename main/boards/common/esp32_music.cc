@@ -495,14 +495,11 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
                                 {
                                     ESP_LOGI(TAG, "Loading lyrics for: %s (lyrics display mode)", song_name.c_str());
 
-                                    // 启动歌词下载和显示
-                                    if (is_lyric_running_)
+                                    // 停止之前的歌词线程（无论运行状态如何都要检查joinable）
+                                    is_lyric_running_ = false;
+                                    if (lyric_thread_.joinable())
                                     {
-                                        is_lyric_running_ = false;
-                                        if (lyric_thread_.joinable())
-                                        {
-                                            lyric_thread_.join();
-                                        }
+                                        lyric_thread_.join();
                                     }
 
                                     is_lyric_running_ = true;
@@ -1589,6 +1586,13 @@ bool Esp32Music::ParseLyrics(const std::string &lyric_content)
 
     lyrics_.clear();
 
+    // 检查歌词内容是否为空
+    if (lyric_content.empty())
+    {
+        ESP_LOGW(TAG, "Lyric content is empty, this song has no lyrics");
+        return false;
+    }
+
     // 按行分割歌词内容
     std::istringstream stream(lyric_content);
     std::string line;
@@ -1693,6 +1697,20 @@ bool Esp32Music::ParseLyrics(const std::string &lyric_content)
 void Esp32Music::LyricDisplayThread()
 {
     ESP_LOGI(TAG, "Lyric display thread started");
+
+    // 等待音乐流稳定后再下载歌词，避免与主线程HTTP请求冲突
+    ESP_LOGI(TAG, "Waiting for audio stream to stabilize before downloading lyrics...");
+    for (int i = 0; i < 50 && is_lyric_running_ && is_playing_; i++)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (!is_lyric_running_ || !is_playing_)
+    {
+        ESP_LOGI(TAG, "Lyric thread cancelled during wait");
+        is_lyric_running_ = false;
+        return;
+    }
 
     if (!DownloadLyrics(current_lyric_url_))
     {
