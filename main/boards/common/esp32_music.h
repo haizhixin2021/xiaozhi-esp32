@@ -16,6 +16,24 @@ extern "C" {
 #include "mp3dec.h"
 }
 
+// AAC/M4A解码器支持
+extern "C" {
+#include "esp_audio_simple_dec.h"
+#include "simple_dec/impl/esp_m4a_dec.h"
+#include "decoder/esp_audio_dec_default.h"
+#include "decoder/impl/esp_aac_dec.h"
+}
+
+// 音频格式类型
+enum class AudioFormat {
+    FORMAT_UNKNOWN = 0,
+    FORMAT_MP3,
+    FORMAT_AAC_ADTS,    // AAC ADTS 格式
+    FORMAT_M4A,         // M4A 容器（包含AAC）
+    FORMAT_WAV,
+    FORMAT_OGG
+};
+
 // 音频数据块结构
 struct AudioChunk {
     uint8_t* data;
@@ -69,12 +87,22 @@ private:
     MP3FrameInfo mp3_frame_info_;
     bool mp3_decoder_initialized_;
     
+    // AAC/M4A解码器相关
+    esp_audio_simple_dec_handle_t aac_decoder_;
+    esp_audio_simple_dec_info_t aac_dec_info_;
+    bool aac_decoder_initialized_;
+    AudioFormat current_audio_format_;
+    
     // 私有方法
     void DownloadAudioStream(const std::string& music_url);
     void PlayAudioStream();
+    void PlayAacStream();  // AAC/M4A 解码播放
     void ClearAudioBuffer();
     bool InitializeMp3Decoder();
     void CleanupMp3Decoder();
+    bool InitializeAacDecoder();
+    void CleanupAacDecoder();
+    AudioFormat DetectAudioFormat(uint8_t* data, size_t size);
     void ResetSampleRate();  // 重置采样率到原始值
     
     // 歌词相关私有方法

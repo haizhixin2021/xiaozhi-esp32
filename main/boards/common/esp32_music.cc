@@ -193,10 +193,12 @@ Esp32Music::Esp32Music() : last_downloaded_data_(), current_music_url_(), curren
                            display_mode_(DISPLAY_MODE_LYRICS), is_playing_(false), is_downloading_(false),
                            play_thread_(), download_thread_(), audio_buffer_(), buffer_mutex_(),
                            buffer_cv_(), buffer_size_(0), mp3_decoder_(nullptr), mp3_frame_info_(),
-                           mp3_decoder_initialized_(false)
+                           mp3_decoder_initialized_(false), aac_decoder_(nullptr), aac_dec_info_(),
+                           aac_decoder_initialized_(false), current_audio_format_(AudioFormat::FORMAT_UNKNOWN)
 {
     ESP_LOGI(TAG, "Music player initialized with default spectrum display mode");
     InitializeMp3Decoder();
+    InitializeAacDecoder();
 }
 
 Esp32Music::~Esp32Music()
@@ -318,6 +320,7 @@ Esp32Music::~Esp32Music()
     // 清理缓冲区和MP3解码器
     ClearAudioBuffer();
     CleanupMp3Decoder();
+    CleanupAacDecoder();
 
     ESP_LOGI(TAG, "Music player destroyed successfully");
 }
@@ -385,6 +388,7 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
     {
         ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
         http->Close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         return false;
     }
 
@@ -395,6 +399,7 @@ bool Esp32Music::Download(const std::string &song_name, const std::string &artis
     last_downloaded_data_ = http->ReadAll();
 
     http->Close();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %d", status_code, last_downloaded_data_.length());
     ESP_LOGI(TAG, "Complete music details response: %s", last_downloaded_data_.c_str());
@@ -746,6 +751,7 @@ void Esp32Music::DownloadAudioStream(const std::string &music_url)
     { // 206 for partial content
         ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
         http->Close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         is_downloading_ = false;
         return;
     }
@@ -791,47 +797,34 @@ void Esp32Music::DownloadAudioStream(const std::string &music_url)
         // 尝试检测文件格式（检查文件头）
         if (total_downloaded == 0 && bytes_read >= 4)
         {
-            if (memcmp(buffer, "ID3", 3) == 0)
+            current_audio_format_ = DetectAudioFormat((uint8_t*)buffer, bytes_read);
+            
+            if (current_audio_format_ == AudioFormat::FORMAT_M4A)
             {
-                ESP_LOGI(TAG, "Detected MP3 file with ID3 tag");
+                ESP_LOGI(TAG, "Detected M4A/AAC file - using AAC decoder");
             }
-            else if (buffer[0] == 0xFF && (buffer[1] & 0xE0) == 0xE0)
+            else if (current_audio_format_ == AudioFormat::FORMAT_AAC_ADTS)
             {
-                ESP_LOGI(TAG, "Detected MP3 file header");
+                ESP_LOGI(TAG, "Detected AAC ADTS file - using AAC decoder");
             }
-            else if (memcmp(buffer, "RIFF", 4) == 0)
+            else if (current_audio_format_ == AudioFormat::FORMAT_MP3)
             {
-                ESP_LOGI(TAG, "Detected WAV file");
+                ESP_LOGI(TAG, "Detected MP3 file - using MP3 decoder");
             }
-            else if (memcmp(buffer, "fLaC", 4) == 0)
+            else if (current_audio_format_ == AudioFormat::FORMAT_WAV)
             {
-                ESP_LOGI(TAG, "Detected FLAC file");
+                ESP_LOGW(TAG, "WAV format not fully supported yet");
             }
-            else if (memcmp(buffer, "OggS", 4) == 0)
+            else if (current_audio_format_ == AudioFormat::FORMAT_OGG)
             {
-                ESP_LOGI(TAG, "Detected OGG file");
-            }
-            else if (bytes_read >= 12 && memcmp(buffer + 4, "ftyp", 4) == 0)
-            {
-                ESP_LOGE(TAG, "Detected M4A/AAC file - NOT SUPPORTED! Only MP3 format is supported");
-                http->Close();
-                is_downloading_ = false;
-                is_playing_ = false;
-                return;
-            }
-            else if (bytes_read >= 2 && buffer[0] == 0xFF && (buffer[1] & 0xF0) == 0xF0)
-            {
-                ESP_LOGE(TAG, "Detected AAC ADTS file - NOT SUPPORTED! Only MP3 format is supported");
-                http->Close();
-                is_downloading_ = false;
-                is_playing_ = false;
-                return;
+                ESP_LOGW(TAG, "OGG format not supported");
             }
             else if (buffer[0] == '{')
             {
                 ESP_LOGE(TAG, "Received JSON response instead of audio data, URL may be invalid");
                 ESP_LOGE(TAG, "Response preview: %.*s", bytes_read > 200 ? 200 : bytes_read, buffer);
                 http->Close();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 is_downloading_ = false;
                 is_playing_ = false;
                 return;
@@ -882,6 +875,7 @@ void Esp32Music::DownloadAudioStream(const std::string &music_url)
     }
 
     http->Close();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     is_downloading_ = false;
 
     // 通知播放线程下载完成
@@ -911,22 +905,42 @@ void Esp32Music::PlayAudioStream()
         return;
     }
 
+    // 等待缓冲区有足够数据开始播放，同时检测音频格式
+    {
+        std::unique_lock<std::mutex> lock(buffer_mutex_);
+        buffer_cv_.wait(lock, [this]
+                        { return buffer_size_ >= MIN_BUFFER_SIZE || (!is_downloading_ && !audio_buffer_.empty()); });
+        
+        // 尝试检测音频格式
+        if (!audio_buffer_.empty())
+        {
+            AudioChunk first_chunk = audio_buffer_.front();
+            if (first_chunk.data && first_chunk.size >= 4)
+            {
+                current_audio_format_ = DetectAudioFormat(first_chunk.data, first_chunk.size);
+                ESP_LOGI(TAG, "Detected audio format: %d", (int)current_audio_format_);
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "小智开源音乐固件qq交流群:826072986");
+    ESP_LOGI(TAG, "Starting playback with buffer size: %d, format: %d", buffer_size_, (int)current_audio_format_);
+
+    // 根据音频格式选择解码器
+    if (current_audio_format_ == AudioFormat::FORMAT_M4A || 
+        current_audio_format_ == AudioFormat::FORMAT_AAC_ADTS)
+    {
+        PlayAacStream();
+        return;
+    }
+
+    // MP3 解码路径
     if (!mp3_decoder_initialized_)
     {
         ESP_LOGE(TAG, "MP3 decoder not initialized");
         is_playing_ = false;
         return;
     }
-
-    // 等待缓冲区有足够数据开始播放
-    {
-        std::unique_lock<std::mutex> lock(buffer_mutex_);
-        buffer_cv_.wait(lock, [this]
-                        { return buffer_size_ >= MIN_BUFFER_SIZE || (!is_downloading_ && !audio_buffer_.empty()); });
-    }
-
-    ESP_LOGI(TAG, "小智开源音乐固件qq交流群:826072986");
-    ESP_LOGI(TAG, "Starting playback with buffer size: %d", buffer_size_);
 
     size_t total_played = 0;
     uint8_t *mp3_input_buffer = nullptr;
@@ -1326,6 +1340,378 @@ void Esp32Music::CleanupMp3Decoder()
     ESP_LOGI(TAG, "MP3 decoder cleaned up");
 }
 
+// 初始化AAC/M4A解码器
+bool Esp32Music::InitializeAacDecoder()
+{
+    // 注册默认音频解码器（包括AAC）
+    esp_audio_err_t ret = esp_audio_dec_register_default();
+    if (ret != ESP_AUDIO_ERR_OK)
+    {
+        ESP_LOGE(TAG, "Failed to register default audio decoders, error: %d", ret);
+        aac_decoder_initialized_ = false;
+        return false;
+    }
+    
+    // 注册M4A解码器
+    ret = esp_m4a_dec_register();
+    if (ret != ESP_AUDIO_ERR_OK)
+    {
+        ESP_LOGW(TAG, "Failed to register M4A decoder, error: %d (may already be registered)", ret);
+    }
+    
+    aac_decoder_ = nullptr;
+    aac_decoder_initialized_ = true;
+    ESP_LOGI(TAG, "AAC/M4A decoders registered successfully");
+    return true;
+}
+
+// 清理AAC/M4A解码器
+void Esp32Music::CleanupAacDecoder()
+{
+    if (aac_decoder_ != nullptr)
+    {
+        esp_audio_simple_dec_close(aac_decoder_);
+        aac_decoder_ = nullptr;
+    }
+    
+    // 注销M4A解码器
+    esp_m4a_dec_unregister();
+    
+    // 注销默认音频解码器
+    esp_audio_dec_unregister_default();
+    
+    aac_decoder_initialized_ = false;
+    ESP_LOGI(TAG, "AAC/M4A decoder cleaned up");
+}
+
+// 检测音频格式
+AudioFormat Esp32Music::DetectAudioFormat(uint8_t* data, size_t size)
+{
+    if (data == nullptr || size < 4)
+    {
+        return AudioFormat::FORMAT_UNKNOWN;
+    }
+    
+    // 检测 MP3
+    if (memcmp(data, "ID3", 3) == 0)
+    {
+        ESP_LOGI(TAG, "Detected MP3 file with ID3 tag");
+        return AudioFormat::FORMAT_MP3;
+    }
+    if (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0)
+    {
+        ESP_LOGI(TAG, "Detected MP3 file header");
+        return AudioFormat::FORMAT_MP3;
+    }
+    
+    // 检测 M4A (ftyp box)
+    if (size >= 12 && memcmp(data + 4, "ftyp", 4) == 0)
+    {
+        ESP_LOGI(TAG, "Detected M4A/AAC file");
+        return AudioFormat::FORMAT_M4A;
+    }
+    
+    // 检测 AAC ADTS
+    if (size >= 2 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0)
+    {
+        ESP_LOGI(TAG, "Detected AAC ADTS file");
+        return AudioFormat::FORMAT_AAC_ADTS;
+    }
+    
+    // 检测 WAV
+    if (memcmp(data, "RIFF", 4) == 0)
+    {
+        ESP_LOGI(TAG, "Detected WAV file");
+        return AudioFormat::FORMAT_WAV;
+    }
+    
+    // 检测 OGG
+    if (memcmp(data, "OggS", 4) == 0)
+    {
+        ESP_LOGI(TAG, "Detected OGG file");
+        return AudioFormat::FORMAT_OGG;
+    }
+    
+    ESP_LOGW(TAG, "Unknown audio format");
+    return AudioFormat::FORMAT_UNKNOWN;
+}
+
+// AAC/M4A 流式播放
+void Esp32Music::PlayAacStream()
+{
+    ESP_LOGI(TAG, "Starting AAC/M4A stream playback");
+
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec || !codec->output_enabled())
+    {
+        ESP_LOGE(TAG, "Audio codec not available or not enabled");
+        is_playing_ = false;
+        return;
+    }
+
+    // 初始化 AAC 解码器
+    esp_m4a_dec_cfg_t m4a_cfg = {
+        .track_idx = 0,
+        .aac_plus_enable = true  // 启用 AAC Plus 支持
+    };
+    
+    esp_audio_simple_dec_cfg_t dec_cfg = {
+        .dec_type = (current_audio_format_ == AudioFormat::FORMAT_M4A) ? 
+                    ESP_AUDIO_SIMPLE_DEC_TYPE_M4A : ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,
+        .dec_cfg = (current_audio_format_ == AudioFormat::FORMAT_M4A) ? &m4a_cfg : nullptr,
+        .cfg_size = (current_audio_format_ == AudioFormat::FORMAT_M4A) ? (int)sizeof(esp_m4a_dec_cfg_t) : 0,
+        .use_frame_dec = false
+    };
+
+    esp_audio_err_t ret = esp_audio_simple_dec_open(&dec_cfg, &aac_decoder_);
+    if (ret != ESP_AUDIO_ERR_OK || aac_decoder_ == nullptr)
+    {
+        ESP_LOGE(TAG, "Failed to open AAC decoder, error: %d", ret);
+        is_playing_ = false;
+        return;
+    }
+
+    aac_decoder_initialized_ = true;
+    ESP_LOGI(TAG, "AAC decoder initialized successfully");
+
+    // 分配输出缓冲区
+    const size_t output_buffer_size = 8192;
+    uint8_t *output_buffer = (uint8_t *)heap_caps_malloc(output_buffer_size, MALLOC_CAP_SPIRAM);
+    if (!output_buffer)
+    {
+        ESP_LOGE(TAG, "Failed to allocate output buffer");
+        esp_audio_simple_dec_close(aac_decoder_);
+        aac_decoder_ = nullptr;
+        aac_decoder_initialized_ = false;
+        is_playing_ = false;
+        return;
+    }
+
+    // 输入数据缓冲区
+    const size_t input_buffer_size = 32 * 1024;
+    uint8_t *input_buffer = (uint8_t *)heap_caps_malloc(input_buffer_size, MALLOC_CAP_SPIRAM);
+    if (!input_buffer)
+    {
+        ESP_LOGE(TAG, "Failed to allocate input buffer");
+        heap_caps_free(output_buffer);
+        esp_audio_simple_dec_close(aac_decoder_);
+        aac_decoder_ = nullptr;
+        aac_decoder_initialized_ = false;
+        is_playing_ = false;
+        return;
+    }
+
+    size_t input_bytes_left = 0;
+    bool first_frame = true;
+
+    while (is_playing_)
+    {
+        // 检查设备状态
+        auto &app = Application::GetInstance();
+        DeviceState current_state = app.GetDeviceState();
+
+        if (current_state == kDeviceStateListening || current_state == kDeviceStateSpeaking)
+        {
+            app.ToggleChatState();
+            vTaskDelay(pdMS_TO_TICKS(300));
+            continue;
+        }
+        else if (current_state != kDeviceStateIdle)
+        {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        // 显示歌名
+        if (!song_name_displayed_ && !current_song_name_.empty())
+        {
+            auto &board = Board::GetInstance();
+            auto display = board.GetDisplay();
+            if (display)
+            {
+                std::string formatted_song_name = "《" + current_song_name_ + "》播放中...";
+                display->SetMusicInfo(formatted_song_name.c_str());
+                ESP_LOGI(TAG, "Displaying song name: %s", formatted_song_name.c_str());
+                song_name_displayed_ = true;
+            }
+
+            if (display && display_mode_ == DISPLAY_MODE_SPECTRUM)
+            {
+                display->startFft();
+            }
+        }
+
+        // 从缓冲区获取数据
+        if (input_bytes_left < input_buffer_size / 2)
+        {
+            AudioChunk chunk;
+            {
+                std::unique_lock<std::mutex> lock(buffer_mutex_);
+                if (audio_buffer_.empty())
+                {
+                    if (!is_downloading_)
+                    {
+                        ESP_LOGI(TAG, "AAC playback finished");
+                        break;
+                    }
+                    buffer_cv_.wait(lock, [this]
+                                    { return !audio_buffer_.empty() || !is_downloading_; });
+                    if (audio_buffer_.empty())
+                    {
+                        if (!is_downloading_)
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                chunk = audio_buffer_.front();
+                audio_buffer_.pop();
+                buffer_size_ -= chunk.size;
+                buffer_cv_.notify_one();
+            }
+
+            // 将数据添加到输入缓冲区末尾
+            size_t copy_size = std::min(chunk.size, input_buffer_size - input_bytes_left);
+            if (copy_size > 0)
+            {
+                memcpy(input_buffer + input_bytes_left, chunk.data, copy_size);
+                input_bytes_left += copy_size;
+            }
+
+            heap_caps_free(chunk.data);
+        }
+
+        // 解码 AAC 数据
+        ESP_LOGD(TAG, "AAC decode input: len=%d, eos=%d", input_bytes_left, !is_downloading_);
+        
+        esp_audio_simple_dec_raw_t raw_data = {
+            .buffer = input_buffer,
+            .len = input_bytes_left,
+            .eos = !is_downloading_,
+            .consumed = 0,
+            .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE
+        };
+
+        esp_audio_simple_dec_out_t out_frame = {
+            .buffer = output_buffer,
+            .len = output_buffer_size,
+            .needed_size = 0,
+            .decoded_size = 0
+        };
+
+        ret = esp_audio_simple_dec_process(aac_decoder_, &raw_data, &out_frame);
+
+        if (ret == ESP_AUDIO_ERR_OK && out_frame.decoded_size > 0)
+        {
+            // 获取解码信息
+            if (first_frame)
+            {
+                esp_audio_simple_dec_get_info(aac_decoder_, &aac_dec_info_);
+                ESP_LOGI(TAG, "AAC info: rate=%d, channels=%d, bits=%d",
+                         aac_dec_info_.sample_rate, aac_dec_info_.channel, aac_dec_info_.bits_per_sample);
+                first_frame = false;
+            }
+            
+            ESP_LOGD(TAG, "AAC decode OK: consumed=%d, decoded=%d bytes", 
+                     raw_data.consumed, out_frame.decoded_size);
+
+            // 更新播放时间
+            int samples = out_frame.decoded_size / (aac_dec_info_.bits_per_sample / 8) / aac_dec_info_.channel;
+            int frame_duration_ms = (samples * 1000) / aac_dec_info_.sample_rate;
+            current_play_time_ms_ += frame_duration_ms;
+
+            // 更新歌词
+            UpdateLyricDisplay(current_play_time_ms_ + 600);
+
+            // 发送 PCM 数据到音频输出
+            int16_t *pcm_data = (int16_t *)output_buffer;
+            int sample_count = out_frame.decoded_size / sizeof(int16_t);
+
+            // 立体声转单声道
+            std::vector<int16_t> mono_buffer;
+            int16_t *final_pcm_data = pcm_data;
+            int final_sample_count = sample_count;
+
+            if (aac_dec_info_.channel == 2)
+            {
+                int mono_samples = sample_count / 2;
+                mono_buffer.resize(mono_samples);
+                for (int i = 0; i < mono_samples; ++i)
+                {
+                    int left = pcm_data[i * 2];
+                    int right = pcm_data[i * 2 + 1];
+                    mono_buffer[i] = (int16_t)((left + right) / 2);
+                }
+                final_pcm_data = mono_buffer.data();
+                final_sample_count = mono_samples;
+            }
+
+            // 发送到音频队列
+            AudioStreamPacket packet;
+            packet.sample_rate = aac_dec_info_.sample_rate;
+            packet.frame_duration = 60;
+            packet.timestamp = 0;
+            packet.payload.resize(final_sample_count * sizeof(int16_t));
+            memcpy(packet.payload.data(), final_pcm_data, packet.payload.size());
+
+            if (final_pcm_data_fft == nullptr)
+            {
+                final_pcm_data_fft = (int16_t *)heap_caps_malloc(
+                    final_sample_count * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+            }
+            memcpy(final_pcm_data_fft, final_pcm_data, final_sample_count * sizeof(int16_t));
+
+            app.AddAudioData(std::move(packet));
+
+            total_frames_decoded_++;
+        }
+
+        // 更新已消费的数据
+        if (raw_data.consumed > 0)
+        {
+            input_bytes_left -= raw_data.consumed;
+            if (input_bytes_left > 0)
+            {
+                memmove(input_buffer, input_buffer + raw_data.consumed, input_bytes_left);
+            }
+        }
+        else if (ret != ESP_AUDIO_ERR_OK)
+        {
+            // 解码失败，跳过一些数据重试
+            ESP_LOGW(TAG, "AAC decode error: %d, consumed: %d, input_left: %d", 
+                     ret, raw_data.consumed, input_bytes_left);
+            if (input_bytes_left > 1024)
+            {
+                // 跳过1KB数据重试
+                memmove(input_buffer, input_buffer + 1024, input_bytes_left - 1024);
+                input_bytes_left -= 1024;
+            }
+            else
+            {
+                input_bytes_left = 0;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // 清理
+    heap_caps_free(output_buffer);
+    heap_caps_free(input_buffer);
+
+    if (aac_decoder_ != nullptr)
+    {
+        esp_audio_simple_dec_close(aac_decoder_);
+        aac_decoder_ = nullptr;
+        aac_decoder_initialized_ = false;
+    }
+
+    ESP_LOGI(TAG, "AAC playback finished, total frames: %d", total_frames_decoded_);
+    is_playing_ = false;
+}
+
 // 重置采样率到原始值
 void Esp32Music::ResetSampleRate()
 {
@@ -1447,6 +1833,7 @@ bool Esp32Music::DownloadLyrics(const std::string &lyric_url)
             // 由于无法获取Location头，只能报告重定向但无法继续
             ESP_LOGW(TAG, "Received redirect status %d but cannot follow redirect (no GetHeader method)", status_code);
             http->Close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             retry_count++;
             continue;
         }
@@ -1456,6 +1843,7 @@ bool Esp32Music::DownloadLyrics(const std::string &lyric_url)
         {
             ESP_LOGE(TAG, "HTTP GET failed with status code: %d", status_code);
             http->Close();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             retry_count++;
             continue;
         }
@@ -1514,6 +1902,9 @@ bool Esp32Music::DownloadLyrics(const std::string &lyric_url)
         }
 
         http->Close();
+        
+        // 等待TCP断开回调完成，避免对象销毁后回调访问无效内存
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         if (read_error)
         {

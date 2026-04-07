@@ -18,6 +18,7 @@ public:
     bool IsDischarging();
     uint8_t GetBatteryLevel();
     float GetBatteryVoltage();
+    bool IsBatteryConnected();  // 检测电池是否连接
 
     void OnChargingStatusChanged(std::function<void(bool)> callback);
 
@@ -34,6 +35,9 @@ private:
     adc_battery_estimation_handle_t adc_battery_estimation_handle_ = nullptr;
     esp_timer_handle_t timer_handle_ = nullptr;
     bool is_charging_ = false;
+    float last_voltage_ = 0.0f;  // 记录上次电压
+    uint8_t last_level_ = 0;     // 记录上次电量，用于平滑滤波
+    bool first_read_ = true;     // 首次读取标志
     std::function<void(bool)> on_charging_status_changed_;
 
     void CheckBatteryStatus();

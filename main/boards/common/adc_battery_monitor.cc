@@ -210,17 +210,41 @@ uint8_t AdcBatteryMonitor::GetBatteryLevel() {
     
     // 在转换前检查边界值
     if (capacity < 0) {
-        return 0;
+        capacity = 0;
     }
     if (capacity > 100) {
-        return 100;
+        capacity = 100;
     }
     
-    return (uint8_t)capacity;
+    uint8_t current_level = (uint8_t)capacity;
+    
+    // 平滑滤波：使用指数移动平均(EMA)，减少电量跳变
+    // 公式：smoothed = α × current + (1-α) × last
+    // α = 0.3 表示新值占30%，旧值占70%
+    if (first_read_) {
+        last_level_ = current_level;
+        first_read_ = false;
+    } else {
+        // 只有当变化超过2%时才更新，避免小波动
+        int diff = abs((int)current_level - (int)last_level_);
+        if (diff > 2) {
+            // 大变化时使用平滑过渡
+            last_level_ = (uint8_t)(0.3f * current_level + 0.7f * last_level_);
+        }
+        // 小变化（≤2%）保持不变，忽略噪声
+    }
+    
+    return last_level_;
 }
 
 void AdcBatteryMonitor::OnChargingStatusChanged(std::function<void(bool)> callback) {
     on_charging_status_changed_ = callback;
+}
+
+bool AdcBatteryMonitor::IsBatteryConnected() {
+    // 电池电压低于 2.5V 认为电池断开
+    // 正常锂电池电压范围: 3.0V - 4.2V
+    return last_voltage_ >= 2.5f;
 }
 
 void AdcBatteryMonitor::CheckBatteryStatus() {
@@ -228,9 +252,14 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
     uint8_t battery_level = GetBatteryLevel();
     float battery_voltage = GetBatteryVoltage();
     
+    // 记录电压用于检测电池是否连接
+    last_voltage_ = battery_voltage;
+    
     // Log battery status every second with voltage
-    ESP_LOGI(TAG, "Battery: %.2fV, Level=%u%%, Charging=%s", 
-             battery_voltage, battery_level, new_charging_status ? "YES" : "NO");
+    ESP_LOGI(TAG, "Battery: %.2fV, Level=%u%%, Charging=%s, Connected=%s", 
+             battery_voltage, battery_level, 
+             new_charging_status ? "YES" : "NO",
+             IsBatteryConnected() ? "YES" : "NO");
     
     if (new_charging_status != is_charging_) {
         is_charging_ = new_charging_status;

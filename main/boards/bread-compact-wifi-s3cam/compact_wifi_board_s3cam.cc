@@ -284,6 +284,13 @@ public:
         
         return true;
     }
+    
+    virtual bool IsBatteryConnected() override {
+        if (battery_monitor_ == nullptr) {
+            return false;
+        }
+        return battery_monitor_->IsBatteryConnected();
+    }
 
     virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
         ESP_LOGI(TAG, "SetPowerSaveLevel called, level=%d", (int)level);

@@ -154,7 +154,13 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     int battery_level;
     bool charging, discharging;
     const char* icon = nullptr;
-    if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+    
+    // 获取电池状态
+    board.GetBatteryLevel(battery_level, charging, discharging);
+    bool battery_connected = board.IsBatteryConnected();
+    
+    if (battery_connected) {
+        // 电池已连接，正常显示电量
         if (charging) {
             icon = FONT_AWESOME_BATTERY_BOLT;
         } else {
@@ -196,6 +202,34 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
                     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                 }
             }
+        }
+    } else if (charging) {
+        // 电池断开但正在充电，显示充电图标
+        icon = FONT_AWESOME_BATTERY_BOLT;
+        DisplayLockGuard lock(this);
+        if (battery_label_ != nullptr && battery_icon_ != icon) {
+            battery_icon_ = icon;
+            lv_label_set_text(battery_label_, battery_icon_);
+        }
+        if (battery_percent_label_ != nullptr) {
+            lv_label_set_text(battery_percent_label_, "");
+        }
+        // 隐藏低电量弹窗
+        if (low_battery_popup_ != nullptr && !lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        // 电池未连接且未充电，隐藏电池图标和百分比
+        DisplayLockGuard lock(this);
+        if (battery_label_ != nullptr) {
+            lv_label_set_text(battery_label_, "");
+        }
+        if (battery_percent_label_ != nullptr) {
+            lv_label_set_text(battery_percent_label_, "");
+        }
+        // 隐藏低电量弹窗
+        if (low_battery_popup_ != nullptr && !lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
