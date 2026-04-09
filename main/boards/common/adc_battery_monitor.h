@@ -9,6 +9,10 @@
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
 
+#include "nvs.h"
+#include "nvs_flash.h"
+
+
 class AdcBatteryMonitor {
 public:
     AdcBatteryMonitor(adc_unit_t adc_unit, adc_channel_t adc_channel, float upper_resistor, float lower_resistor, gpio_num_t charging_pin = GPIO_NUM_NC, int charging_active_level = 1, const battery_point_t* battery_points = nullptr, size_t battery_points_count = 0);
@@ -18,9 +22,10 @@ public:
     bool IsDischarging();
     uint8_t GetBatteryLevel();
     float GetBatteryVoltage();
-    bool IsBatteryConnected();  // 检测电池是否连接
+    bool IsBatteryConnected();
 
     void OnChargingStatusChanged(std::function<void(bool)> callback);
+    void OnLowBatteryStatusChanged(std::function<void(bool)> callback);
 
 private:
     gpio_num_t charging_pin_;
@@ -35,12 +40,48 @@ private:
     adc_battery_estimation_handle_t adc_battery_estimation_handle_ = nullptr;
     esp_timer_handle_t timer_handle_ = nullptr;
     bool is_charging_ = false;
-    float last_voltage_ = 0.0f;  // 记录上次电压
-    uint8_t last_level_ = 0;     // 记录上次电量，用于平滑滤波
-    bool first_read_ = true;     // 首次读取标志
+    float last_voltage_ = 0.0f;
+    uint8_t last_level_ = 0;
+    bool first_read_ = true;
     std::function<void(bool)> on_charging_status_changed_;
+    std::function<void(bool)> on_low_battery_status_changed_;
+
+    nvs_handle_t nvs_handle_;
+    bool nvs_ready_ = false;
+    
+    bool is_low_battery_ = false;
+    uint8_t last_logged_level_ = 255;
+    int log_counter_ = 0;
+    static const int kLogInterval = 12;
+    
+    static const int kWindowCount = 5;
+    uint8_t level_window_[5] = {0};
+    int window_index_ = 0;
+    bool window_filled_ = false;
+    float last_stable_voltage_ = 0.0f;
+    int voltage_stable_count_ = 0;
+    static const int kVoltageStableThreshold = 3;
+    bool startup_stable_ = false;
+    uint8_t last_saved_level = 255;
+    int64_t last_save_time = 0;
+
+    // ===== 自动校准参数 =====
+    float k_ = 1.0f;
+    float b_ = 0.0f;
+
+    // ===== 校准采样点 =====
+    float cal_v_adc_full_ = 0.0f;
+    float cal_v_adc_low_ = 0.0f;
+
+    float cal_v_real_full_ = 4.2f;
+    float cal_v_real_low_ = 3.65f;   // 推荐固定（更稳定）
+
+    bool cal_has_full_ = false;
+    bool cal_has_low_ = false;
 
     void CheckBatteryStatus();
+    uint8_t GetSmoothedLevel(uint8_t current_level);
+    bool IsVoltageStable(float voltage);
 };
 
 #endif // ADC_BATTERY_MONITOR_H

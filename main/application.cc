@@ -1197,14 +1197,14 @@ void Application::StartAlarmRing(const std::string& name) {
     alarm_ringing_ = true;
     alarm_name_ = name;
     
-    PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+    PlaySound(Lang::Sounds::OGG_ALARM_RING);
     Alert("alarm", name.c_str(), "happy");
     
     esp_timer_create_args_t timer_args = {
         .callback = [](void* arg) {
             Application* app = static_cast<Application*>(arg);
             if (app->alarm_ringing_) {
-                app->PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+                app->PlaySound(Lang::Sounds::OGG_ALARM_RING);
             }
         },
         .arg = this,
@@ -1213,7 +1213,7 @@ void Application::StartAlarmRing(const std::string& name) {
     };
     
     esp_timer_create(&timer_args, &alarm_ring_timer_);
-    esp_timer_start_periodic(alarm_ring_timer_, 3000000);
+    esp_timer_start_periodic(alarm_ring_timer_, 8000000);
     
     ESP_LOGI(TAG, "Alarm ringing started: %s", name.c_str());
 }
