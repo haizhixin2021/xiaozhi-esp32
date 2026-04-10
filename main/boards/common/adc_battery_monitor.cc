@@ -278,7 +278,7 @@ uint8_t AdcBatteryMonitor::GetBatteryLevel() {
     } else {
         // 放电允许缓慢下降
         if (current_level < last_level_) {
-            current_level = last_level_ - 1;
+           current_level = std::max(current_level, last_level_ - 2);
         }
     }
     
@@ -516,7 +516,7 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         if (!is_charging_ && battery_voltage > 3.5f && battery_voltage < 3.7f) {
             low_stable_cnt++;
 
-            if (low_stable_cnt >= 5) {
+            if (low_stable_cnt >= 8) {
                 cal_v_adc_low_ = battery_voltage;
                 cal_has_low_ = true;
 
@@ -583,7 +583,7 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
                     
     // ⭐ 写入冷却保护
     static int64_t next_allowed_save_time = 0;
-
+    static int write_counter = 0;
     if (now < next_allowed_save_time) {
         need_save = false;
     }
@@ -599,7 +599,12 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
     // ⭐ 保存电量到NVS（带限频）
     if (nvs_ready_ && need_save) {
         nvs_set_u8(nvs_handle_, "level", battery_level);
-        nvs_commit(nvs_handle_);
+        write_counter++;
+        bool force_commit = low_battery || big_change;
+        if (write_counter >= 3 || force_commit) {
+            nvs_commit(nvs_handle_);
+            write_counter = 0;
+        }
         
         ESP_LOGI(TAG, "Battery level saved to NVS: %d%% (voltage: %.2fV)", battery_level, battery_voltage);
         
