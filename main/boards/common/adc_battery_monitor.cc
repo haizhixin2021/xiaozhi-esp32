@@ -145,6 +145,9 @@ AdcBatteryMonitor::AdcBatteryMonitor(adc_unit_t adc_unit, adc_channel_t adc_chan
         }
     }
 
+    init_ok_ = true;
+    ESP_LOGI(TAG, "AdcBatteryMonitor init OK");
+
 }
 
 AdcBatteryMonitor::~AdcBatteryMonitor() {
@@ -405,6 +408,8 @@ bool AdcBatteryMonitor::IsBatteryConnected() {
 }
 
 void AdcBatteryMonitor::CheckBatteryStatus() {
+    if (!init_ok_) return;   // ⭐必须加
+    
     // ① 先预热（过滤垃圾数据）
     static int warmup_count = 0;
     if (warmup_count < 20) {
