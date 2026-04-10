@@ -416,11 +416,19 @@ bool AdcBatteryMonitor::IsBatteryConnected() {
 void AdcBatteryMonitor::CheckBatteryStatus() {
     if (!init_ok_) return;   // ⭐必须加
     
-    // ① 先预热（过滤垃圾数据）
-    static int warmup_count = 0;
-    if (warmup_count < 20) {
-        GetBatteryVoltage();
-        warmup_count++;
+    // ① 启动预热（ADC稳定）
+    static int warmup_stable_cnt = 0;
+
+    float v = GetBatteryVoltage();
+
+    if (!IsVoltageStable(v)) {
+        warmup_stable_cnt = 0;
+        return;
+    } else {
+        warmup_stable_cnt++;
+    }
+
+    if (warmup_stable_cnt < 3) {
         return;
     }
 
