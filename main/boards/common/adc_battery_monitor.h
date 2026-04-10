@@ -1,5 +1,6 @@
 #ifndef ADC_BATTERY_MONITOR_H
 #define ADC_BATTERY_MONITOR_H
+#define ADC_SAMPLE_COUNT 8
 
 #include <functional>
 #include <driver/gpio.h>
@@ -8,9 +9,13 @@
 #include <esp_adc/adc_oneshot.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <cmath>
 
 #include "nvs.h"
 #include "nvs_flash.h"
+
 
 
 class AdcBatteryMonitor {
@@ -78,6 +83,7 @@ private:
 
     bool cal_has_full_ = false;
     bool cal_has_low_ = false;
+    bool init_ok_ = false;
 
     void CheckBatteryStatus();
     uint8_t GetSmoothedLevel(uint8_t current_level);

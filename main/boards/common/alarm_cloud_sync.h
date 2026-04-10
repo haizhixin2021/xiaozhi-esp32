@@ -7,6 +7,9 @@
 #include <memory>
 #include <cJSON.h>
 #include "alarm_clock.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 struct CloudAlarm {
     uint32_t cloud_id;
@@ -53,9 +56,14 @@ private:
     
     std::string BuildAlarmJson(const Alarm& alarm);
     CloudAlarm ParseCloudAlarm(const cJSON* json);
+    bool IsAlarmChanged(const Alarm& local, const CloudAlarm& cloud);
     
     bool SendRequest(const std::string& method, const std::string& path, 
                      const std::string& body, std::string& response);
+    
+    void SyncTaskFunc();
+    static void SyncTaskEntry(void* arg);
+    static void SyncTimerCallback(void* arg);
     
     std::string server_url_;
     std::string device_id_;
@@ -65,7 +73,9 @@ private:
     time_t last_sync_time_ = 0;
     esp_timer_handle_t sync_timer_ = nullptr;
     
-    static void SyncTimerCallback(void* arg);
+    TaskHandle_t sync_task_ = nullptr;
+    QueueHandle_t sync_queue_ = nullptr;
+    bool stop_requested_ = false;
 };
 
 #endif

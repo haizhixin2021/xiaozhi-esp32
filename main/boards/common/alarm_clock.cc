@@ -153,10 +153,14 @@ bool AlarmStorage::SaveAlarm(const Alarm& alarm) {
     
     std::string json = alarm.ToJson();
     
+    ESP_LOGI(TAG, "NVS write: alarm id=%u, name=%s, json_len=%d", 
+             alarm.id, alarm.name.c_str(), (int)json.length());
+    
     if (existing_index >= 0) {
         char key[20];
         snprintf(key, sizeof(key), "alarm_%" PRId32, existing_index);
         settings.SetString(key, json);
+        ESP_LOGI(TAG, "NVS update: key=%s (existing)", key);
     } else {
         if (count >= kMaxAlarms) {
             ESP_LOGW(TAG, "Max alarms reached (%d)", kMaxAlarms);
@@ -166,9 +170,10 @@ bool AlarmStorage::SaveAlarm(const Alarm& alarm) {
         snprintf(key, sizeof(key), "alarm_%" PRId32, count);
         settings.SetString(key, json);
         settings.SetInt(kCountKey, count + 1);
+        ESP_LOGI(TAG, "NVS add: key=%s, total_count=%d", key, count + 1);
     }
     
-    ESP_LOGI(TAG, "Saved alarm id=%u, name=%s", alarm.id, alarm.name.c_str());
+    ESP_LOGI(TAG, "Alarm saved: id=%u, name=%s", alarm.id, alarm.name.c_str());
     return true;
 }
 
@@ -194,6 +199,7 @@ bool AlarmStorage::DeleteAlarm(uint32_t id) {
     }
     
     settings.EraseAll();
+    ESP_LOGI(TAG, "NVS erase all: clearing namespace for delete operation");
     
     for (size_t i = 0; i < remaining_alarms.size(); i++) {
         char key[20];
@@ -201,15 +207,16 @@ bool AlarmStorage::DeleteAlarm(uint32_t id) {
         settings.SetString(key, remaining_alarms[i].ToJson());
     }
     settings.SetInt(kCountKey, remaining_alarms.size());
+    ESP_LOGI(TAG, "NVS rewrite: %d remaining alarms after delete", (int)remaining_alarms.size());
     
-    ESP_LOGI(TAG, "Deleted alarm id=%u", id);
+    ESP_LOGI(TAG, "Alarm deleted: id=%u", id);
     return true;
 }
 
 bool AlarmStorage::ClearAll() {
     Settings settings(kNamespace, true);
     settings.EraseAll();
-    ESP_LOGI(TAG, "Cleared all alarms");
+    ESP_LOGI(TAG, "NVS erase all: cleared all alarms from namespace");
     return true;
 }
 
@@ -217,6 +224,7 @@ uint32_t AlarmStorage::GetNextId() {
     Settings settings(kNamespace, true);
     int32_t next_id = settings.GetInt(kNextIdKey, 1);
     settings.SetInt(kNextIdKey, next_id + 1);
+    ESP_LOGI(TAG, "NVS write: next_id=%d (incremented)", next_id + 1);
     return (uint32_t)next_id;
 }
 

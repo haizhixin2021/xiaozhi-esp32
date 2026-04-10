@@ -6,6 +6,7 @@
 #include <esp_timer.h>
 #include <cJSON.h>
 #include <cstring>
+#include <map>
 
 #define TAG "AlarmCloudSync"
 
@@ -18,6 +19,21 @@ AlarmCloudSync::AlarmCloudSync() {}
 
 AlarmCloudSync::~AlarmCloudSync() {
     StopAutoSync();
+    
+    stop_requested_ = true;
+    if (sync_queue_ != nullptr) {
+        int msg = 1;
+        xQueueSend(sync_queue_, &msg, 0);
+    }
+    if (sync_task_ != nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelete(sync_task_);
+        sync_task_ = nullptr;
+    }
+    if (sync_queue_ != nullptr) {
+        vQueueDelete(sync_queue_);
+        sync_queue_ = nullptr;
+    }
 }
 
 void AlarmCloudSync::Initialize(const std::string& server_url, const std::string& device_id, const std::string& token) {
@@ -27,6 +43,14 @@ void AlarmCloudSync::Initialize(const std::string& server_url, const std::string
     
     if (!server_url_.empty() && server_url_.back() == '/') {
         server_url_.pop_back();
+    }
+    
+    if (sync_queue_ == nullptr) {
+        sync_queue_ = xQueueCreate(1, sizeof(int));
+    }
+    
+    if (sync_task_ == nullptr) {
+        xTaskCreate(SyncTaskEntry, "alarm_sync", 8192, this, 5, &sync_task_);
     }
     
     ESP_LOGI(TAG, "Initialized with server: %s, device: %s", server_url_.c_str(), device_id_.c_str());
@@ -65,7 +89,33 @@ void AlarmCloudSync::StopAutoSync() {
 
 void AlarmCloudSync::SyncTimerCallback(void* arg) {
     AlarmCloudSync* sync = static_cast<AlarmCloudSync*>(arg);
-    sync->FullSync();
+    if (sync->sync_queue_ != nullptr) {
+        int msg = 1;
+        xQueueSend(sync->sync_queue_, &msg, 0);
+    }
+}
+
+void AlarmCloudSync::SyncTaskEntry(void* arg) {
+    AlarmCloudSync* sync = static_cast<AlarmCloudSync*>(arg);
+    sync->SyncTaskFunc();
+    vTaskDelete(nullptr);
+}
+
+void AlarmCloudSync::SyncTaskFunc() {
+    ESP_LOGI(TAG, "Sync task started");
+    
+    while (!stop_requested_) {
+        int msg;
+        if (xQueueReceive(sync_queue_, &msg, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            if (stop_requested_) {
+                break;
+            }
+            ESP_LOGI(TAG, "Sync task received message, starting FullSync");
+            FullSync(nullptr);
+        }
+    }
+    
+    ESP_LOGI(TAG, "Sync task stopped");
 }
 
 void AlarmCloudSync::SyncToCloud(SyncCallback callback) {
@@ -152,22 +202,63 @@ void AlarmCloudSync::SyncFromCloud(SyncCallback callback) {
     }
     
     auto& manager = AlarmManager::GetInstance();
-    manager.ClearAllAlarms();
+    auto local_alarms = manager.GetAllAlarms();
     
-    for (const auto& cloud_alarm : cloud_alarms) {
+    std::map<uint32_t, Alarm> local_map;
+    for (const auto& alarm : local_alarms) {
+        local_map[alarm.id] = alarm;
+    }
+    
+    std::map<uint32_t, CloudAlarm> cloud_map;
+    for (const auto& alarm : cloud_alarms) {
+        cloud_map[alarm.cloud_id] = alarm;
+    }
+    
+    int added_count = 0;
+    int updated_count = 0;
+    int deleted_count = 0;
+    
+    std::vector<uint32_t> to_delete;
+    for (const auto& [id, alarm] : local_map) {
+        if (cloud_map.find(id) == cloud_map.end()) {
+            to_delete.push_back(id);
+        }
+    }
+    
+    for (uint32_t id : to_delete) {
+        manager.RemoveAlarm(id);
+        deleted_count++;
+        ESP_LOGI(TAG, "Deleted alarm id=%u (not in cloud)", id);
+    }
+    
+    for (const auto& [id, cloud_alarm] : cloud_map) {
         int hour = cloud_alarm.hour >= 0 ? cloud_alarm.hour : -1;
         int minute = cloud_alarm.minute >= 0 ? cloud_alarm.minute : -1;
         
-        manager.AddAlarm(cloud_alarm.name, 0, hour, minute, 
-                         cloud_alarm.repeat_count, cloud_alarm.interval);
+        if (local_map.find(id) == local_map.end()) {
+            manager.AddAlarm(cloud_alarm.name, 0, hour, minute, 
+                             cloud_alarm.repeat_count, cloud_alarm.interval);
+            added_count++;
+            ESP_LOGI(TAG, "Added alarm id=%u, name=%s", id, cloud_alarm.name.c_str());
+        } else {
+            const auto& local_alarm = local_map[id];
+            if (IsAlarmChanged(local_alarm, cloud_alarm)) {
+                manager.UpdateAlarm(id, cloud_alarm.name, hour, minute,
+                                   cloud_alarm.repeat_count, cloud_alarm.interval);
+                updated_count++;
+                ESP_LOGI(TAG, "Updated alarm id=%u, name=%s", id, cloud_alarm.name.c_str());
+            }
+        }
     }
     
     last_sync_time_ = time(nullptr);
     is_syncing_ = false;
     
-    std::string message = "Downloaded " + std::to_string(cloud_alarms.size()) + " alarms";
-    ESP_LOGI(TAG, "%s", message.c_str());
+    ESP_LOGI(TAG, "Smart sync done: added=%d, updated=%d, deleted=%d, unchanged=%d", 
+             added_count, updated_count, deleted_count, 
+             (int)cloud_alarms.size() - added_count - updated_count);
     
+    std::string message = "Synced " + std::to_string(cloud_alarms.size()) + " alarms";
     if (callback) callback(true, message);
 }
 
@@ -274,18 +365,43 @@ bool AlarmCloudSync::DownloadAlarms(std::vector<CloudAlarm>& alarms) {
         return false;
     }
     
-    cJSON* root = cJSON_Parse(response.c_str());
-    if (!root) return false;
+    ESP_LOGI(TAG, "DownloadAlarms response: %s", response.c_str());
     
-    cJSON* data = cJSON_GetObjectItem(root, "data");
-    if (!data || !cJSON_IsArray(data)) {
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (!root) {
+        ESP_LOGE(TAG, "Failed to parse JSON response");
+        return false;
+    }
+    
+    cJSON* alarms_array = nullptr;
+    
+    if (cJSON_IsArray(root)) {
+        alarms_array = root;
+        ESP_LOGI(TAG, "Response is direct array");
+    } else {
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        if (data) {
+            if (cJSON_IsArray(data)) {
+                alarms_array = data;
+                ESP_LOGI(TAG, "Response has data array");
+            } else {
+                alarms_array = cJSON_GetObjectItem(data, "alarms");
+                ESP_LOGI(TAG, "Response has data.alarms array");
+            }
+        }
+    }
+    
+    if (!alarms_array || !cJSON_IsArray(alarms_array)) {
+        ESP_LOGE(TAG, "No alarms array found in response");
         cJSON_Delete(root);
         return false;
     }
     
-    int count = cJSON_GetArraySize(data);
+    int count = cJSON_GetArraySize(alarms_array);
+    ESP_LOGI(TAG, "Found %d alarms in cloud", count);
+    
     for (int i = 0; i < count; i++) {
-        cJSON* item = cJSON_GetArrayItem(data, i);
+        cJSON* item = cJSON_GetArrayItem(alarms_array, i);
         alarms.push_back(ParseCloudAlarm(item));
     }
     
@@ -334,6 +450,7 @@ CloudAlarm AlarmCloudSync::ParseCloudAlarm(const cJSON* json) {
     if (item && cJSON_IsString(item)) alarm.name = item->valuestring;
     
     item = cJSON_GetObjectItem(json, "trigger_time");
+    if (!item) item = cJSON_GetObjectItem(json, "triggerTime");
     if (item) alarm.trigger_time = (time_t)item->valuedouble;
     
     item = cJSON_GetObjectItem(json, "hour");
@@ -343,6 +460,7 @@ CloudAlarm AlarmCloudSync::ParseCloudAlarm(const cJSON* json) {
     if (item) alarm.minute = (int16_t)item->valueint;
     
     item = cJSON_GetObjectItem(json, "repeat_count");
+    if (!item) item = cJSON_GetObjectItem(json, "repeatCount");
     if (item) alarm.repeat_count = item->valueint;
     
     item = cJSON_GetObjectItem(json, "interval");
@@ -354,5 +472,50 @@ CloudAlarm AlarmCloudSync::ParseCloudAlarm(const cJSON* json) {
     item = cJSON_GetObjectItem(json, "type");
     if (item) alarm.type = (uint8_t)item->valueint;
     
+    ESP_LOGI(TAG, "Parsed cloud alarm: id=%u, name=%s, hour=%d, minute=%d, repeat=%d, interval=%d, enabled=%d, type=%d",
+             alarm.cloud_id, alarm.name.c_str(), alarm.hour, alarm.minute, 
+             alarm.repeat_count, alarm.interval, alarm.enabled, alarm.type);
+    
     return alarm;
+}
+
+bool AlarmCloudSync::IsAlarmChanged(const Alarm& local, const CloudAlarm& cloud) {
+    if (local.name != cloud.name) {
+        ESP_LOGI(TAG, "Alarm changed: name differs (local='%s', cloud='%s')", 
+                 local.name.c_str(), cloud.name.c_str());
+        return true;
+    }
+    if (local.hour != cloud.hour) {
+        ESP_LOGI(TAG, "Alarm changed: hour differs (local=%d, cloud=%d)", 
+                 local.hour, cloud.hour);
+        return true;
+    }
+    if (local.minute != cloud.minute) {
+        ESP_LOGI(TAG, "Alarm changed: minute differs (local=%d, cloud=%d)", 
+                 local.minute, cloud.minute);
+        return true;
+    }
+    if (local.repeat_count != cloud.repeat_count) {
+        ESP_LOGI(TAG, "Alarm changed: repeat_count differs (local=%d, cloud=%d)", 
+                 local.repeat_count, cloud.repeat_count);
+        return true;
+    }
+    if (local.interval != cloud.interval) {
+        ESP_LOGI(TAG, "Alarm changed: interval differs (local=%d, cloud=%d)", 
+                 local.interval, cloud.interval);
+        return true;
+    }
+    if (local.enabled != cloud.enabled) {
+        ESP_LOGI(TAG, "Alarm changed: enabled differs (local=%d, cloud=%d)", 
+                 local.enabled, cloud.enabled);
+        return true;
+    }
+    if (local.type != cloud.type) {
+        ESP_LOGI(TAG, "Alarm changed: type differs (local=%d, cloud=%d)", 
+                 local.type, cloud.type);
+        return true;
+    }
+    
+    ESP_LOGI(TAG, "Alarm unchanged: id=%u, name=%s", local.id, local.name.c_str());
+    return false;
 }
