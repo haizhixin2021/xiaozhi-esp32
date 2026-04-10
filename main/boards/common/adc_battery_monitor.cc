@@ -168,6 +168,10 @@ AdcBatteryMonitor::~AdcBatteryMonitor() {
         esp_timer_stop(timer_handle_);
         esp_timer_delete(timer_handle_);
     }
+
+    if (nvs_ready_) {
+        nvs_close(nvs_handle_);
+    }
 }
 
 bool AdcBatteryMonitor::IsCharging() {
@@ -389,7 +393,15 @@ void AdcBatteryMonitor::OnLowBatteryStatusChanged(std::function<void(bool)> call
 }
 
 bool AdcBatteryMonitor::IsBatteryConnected() {
-    return (last_voltage_ > 3.0f && last_voltage_ < 4.5f);
+    static int valid_cnt = 0;
+
+    if (last_voltage_ > 3.2f && last_voltage_ < 4.4f) {
+        valid_cnt++;
+    } else {
+        valid_cnt = 0;
+    }
+
+    return valid_cnt >= 3;
 }
 
 void AdcBatteryMonitor::CheckBatteryStatus() {
@@ -474,8 +486,10 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         if (is_charging_ && battery_voltage > 4.15f && battery_voltage < 4.25f) {
             full_stable_cnt++;
 
-            if (full_stable_cnt >= 5) {
-                cal_v_adc_full_ = battery_voltage;
+            // 始终记录最大值（关键优化）
+            cal_v_adc_full_ = fmaxf(cal_v_adc_full_, battery_voltage);
+
+            if (full_stable_cnt >= 8) {
                 cal_has_full_ = true;
 
                 ESP_LOGI("CAL", "Captured FULL point: adc=%.3f", battery_voltage);
@@ -535,6 +549,8 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
             // ⭐ 清标志（避免反复算）
             cal_has_full_ = false;
             cal_has_low_ = false;
+            cal_v_adc_full_ = 0.0f;
+            cal_v_adc_low_ = 0.0f;
         }
     }
 
