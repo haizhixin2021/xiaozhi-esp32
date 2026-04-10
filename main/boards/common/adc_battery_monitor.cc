@@ -186,6 +186,7 @@ bool AdcBatteryMonitor::IsDischarging() {
 }
 
 float AdcBatteryMonitor::GetBatteryVoltage() {
+    if (!init_ok_) return 0.0f;   //必须加
     if (adc_handle_ == nullptr || adc_cali_handle_ == nullptr) {
         return 0.0f;
     }
@@ -236,6 +237,8 @@ float AdcBatteryMonitor::GetBatteryVoltage() {
 }
 
 uint8_t AdcBatteryMonitor::GetBatteryLevel() {
+    if (!init_ok_) return 100;   // 或者 return last_level_
+    
     if (adc_battery_estimation_handle_ == nullptr) {
         return 100;
     }
