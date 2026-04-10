@@ -109,7 +109,9 @@ AdcBatteryMonitor::AdcBatteryMonitor(adc_unit_t adc_unit, adc_channel_t adc_chan
         .name = "adc_battery_monitor",
     };
     ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, &timer_handle_));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 5000000));
+    if (init_ok_) {
+        ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle_, 5000000));
+    }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -178,6 +180,7 @@ AdcBatteryMonitor::~AdcBatteryMonitor() {
 }
 
 bool AdcBatteryMonitor::IsCharging() {
+    if (!init_ok_) return false;
     return is_charging_;
 }
 
