@@ -16,6 +16,25 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+// ===== 快速测试模式（验证后改为0关闭） =====
+#define CALIBRATION_TEST_MODE 1
+
+#if CALIBRATION_TEST_MODE
+#define CAL_SAMPLE_COUNT 3
+#define CAL_FULL_MIN 4.0f
+#define CAL_FULL_MAX 4.3f
+#define CAL_LOW_MIN 3.4f
+#define CAL_LOW_MAX 3.8f
+#define CAL_CAN_SAMPLE true
+#else
+#define CAL_SAMPLE_COUNT 8
+#define CAL_FULL_MIN 4.15f
+#define CAL_FULL_MAX 4.25f
+#define CAL_LOW_MIN 3.5f
+#define CAL_LOW_MAX 3.7f
+#define CAL_CAN_SAMPLE (!is_charging_)
+#endif
+
 
 
 class AdcBatteryMonitor {
@@ -71,7 +90,7 @@ private:
     int64_t last_save_time = 0;
 
     // ===== 自动校准参数 =====
-    float k_ = 1.0f;
+    float k_ = 1.01f;
     float b_ = 0.0f;
 
     // ===== 校准采样点 =====
@@ -84,10 +103,15 @@ private:
     bool cal_has_full_ = false;
     bool cal_has_low_ = false;
     bool init_ok_ = false;
+    
+    // ===== 电池映射表 =====
+    const battery_point_t* battery_points_ = nullptr;
+    size_t battery_points_count_ = 0;
 
     void CheckBatteryStatus();
     uint8_t GetSmoothedLevel(uint8_t current_level);
     bool IsVoltageStable(float voltage);
+    uint8_t CalculateBatteryLevel(float voltage);  // 新增：自己计算百分比
 };
 
 #endif // ADC_BATTERY_MONITOR_H

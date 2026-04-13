@@ -1398,7 +1398,7 @@ AudioFormat Esp32Music::DetectAudioFormat(uint8_t* data, size_t size)
         ESP_LOGI(TAG, "Detected MP3 file with ID3 tag");
         return AudioFormat::FORMAT_MP3;
     }
-    if (data[0] == 0xFF && (data[1] & 0xE0) == 0xE0)
+    if (data[0] == 0xFF && (data[1] & 0xF0) == 0xE0)
     {
         ESP_LOGI(TAG, "Detected MP3 file header");
         return AudioFormat::FORMAT_MP3;

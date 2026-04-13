@@ -4,7 +4,9 @@
 static const char* TAG = "AdcBatteryMonitor";
 
 AdcBatteryMonitor::AdcBatteryMonitor(adc_unit_t adc_unit, adc_channel_t adc_channel, float upper_resistor, float lower_resistor, gpio_num_t charging_pin, int charging_active_level, const battery_point_t* battery_points, size_t battery_points_count)
-    : charging_pin_(charging_pin), charging_active_level_(charging_active_level), adc_unit_(adc_unit), adc_channel_(adc_channel), upper_resistor_(upper_resistor), lower_resistor_(lower_resistor) {
+    : charging_pin_(charging_pin), charging_active_level_(charging_active_level), adc_unit_(adc_unit), adc_channel_(adc_channel), upper_resistor_(upper_resistor), lower_resistor_(lower_resistor), battery_points_(battery_points), battery_points_count_(battery_points_count) {
+    
+    ESP_LOGI(TAG, "Battery points count: %d", battery_points_count_);
     
     // Initialize charging pin (only if it's not NC)
     if (charging_pin_ != GPIO_NUM_NC) {
@@ -140,9 +142,7 @@ AdcBatteryMonitor::AdcBatteryMonitor(adc_unit_t adc_unit, adc_channel_t adc_chan
 
             ESP_LOGI("CAL", "Loaded calibration: k=%.4f b=%.4f", k_, b_);
         } else {
-            k_ = 1.0f;
-            b_ = 0.0f;
-            ESP_LOGI("CAL", "No calibration data, use default");
+            ESP_LOGI("CAL", "No calibration data, use default (k=1.01 for ~1%% ADC offset)");
         }
     }
 
@@ -217,7 +217,12 @@ float AdcBatteryMonitor::GetBatteryVoltage() {
     }
     
     float avg_mv = total_mv / (float)valid_samples;
-    float battery_voltage = avg_mv / 1000.0f / voltage_divider_ratio_;
+    float uncalibrated_voltage = avg_mv / 1000.0f / voltage_divider_ratio_;
+    
+    ESP_LOGI(TAG, "=== ADC Reading ===");
+    ESP_LOGI(TAG, "  Samples: %d/%d, Avg ADC: %.3fV", valid_samples, ADC_SAMPLE_COUNT, avg_mv / 1000.0f);
+    ESP_LOGI(TAG, "  Divider: R1=%.0fΩ, R2=%.0fΩ, Ratio=%.4f", upper_resistor_, lower_resistor_, voltage_divider_ratio_);
+    ESP_LOGI(TAG, "  Uncalibrated Voltage: %.3fV", uncalibrated_voltage);
     
     // ADC校准系数：补偿ADC读取电压与实际电压的偏差
     // 根据实际测量，ADC读取电压比万用表测量值低约3%
@@ -230,7 +235,10 @@ float AdcBatteryMonitor::GetBatteryVoltage() {
     } */
 
     // ⭐ 自动校准后的电压
-    battery_voltage = battery_voltage * k_ + b_;
+    float battery_voltage = uncalibrated_voltage * k_ + b_;
+    
+    ESP_LOGI(TAG, "  Calibration: k=%.4f, b=%.4f", k_, b_);
+    ESP_LOGI(TAG, "  Calibrated Voltage: %.3fV", battery_voltage);
 
     if (is_charging_) {
         float compensation = 0.04f;   // 默认
@@ -242,10 +250,10 @@ float AdcBatteryMonitor::GetBatteryVoltage() {
         }
 
         battery_voltage -= compensation;
+        ESP_LOGI(TAG, "  Charging Compensation: -%.3fV", compensation);
     }
     
-    ESP_LOGD(TAG, "ADC voltage: %.3fV, divider ratio: %.4f, battery voltage: %.3fV", 
-             avg_mv / 1000.0f, voltage_divider_ratio_, battery_voltage);
+    ESP_LOGI(TAG, "  Final Voltage: %.3fV (%s)", battery_voltage, is_charging_ ? "CHARGING" : "DISCHARGING");
     
     return battery_voltage;
 }
@@ -259,45 +267,22 @@ uint8_t AdcBatteryMonitor::GetBatteryLevel() {
 
     float battery_voltage = last_voltage_;   // ✅ 用缓存值，不再读ADC
     
-    if (adc_battery_estimation_handle_ == nullptr) {
-        return 100;
-    }
+    // 使用自己的映射表计算百分比
+    uint8_t current_level = CalculateBatteryLevel(battery_voltage);
     
-    float capacity = 0;
-    esp_err_t err = adc_battery_estimation_get_capacity(adc_battery_estimation_handle_, &capacity);
-    if (err != ESP_OK) {
-        return 100;
-    }
-    
-    if (capacity < 0) {
-        capacity = 0;
-    }
-    if (capacity > 100) {
-        capacity = 100;
-    }
-    
-    uint8_t current_level = (uint8_t)capacity;
+    ESP_LOGI(TAG, "=== Battery Level Calculation ===");
+    ESP_LOGI(TAG, "  Voltage: %.3fV, Calculated Level: %d%%", battery_voltage, current_level);
 
     int diff = abs((int)current_level - (int)last_level_);
 
+    // ⭐ 第一次读取时不应用过滤逻辑（NVS 恢复后可能差异较大）
     if (!first_read_ && diff > 20) {
+        ESP_LOGI(TAG, "  Filtered: Jump too large (%d%% -> %d%%), keeping %d%%", last_level_, current_level, last_level_);
         current_level = last_level_;   // 丢弃
-    } else if (diff > 10) {
-        current_level = (last_level_ + current_level) / 2; // ⭐ 拉回一半
-    }
-
-    if (is_charging_) {
-        if (current_level > last_level_) {
-            current_level = last_level_ + 1;  // 每次最多+1%
-        } else {
-            current_level = last_level_;     // 不允许下降
-        }
-    } else {
-        // 放电允许缓慢下降
-        if (current_level < last_level_) {
-            uint8_t min_level = (last_level_ > 2) ? (last_level_ - 2) : 0;
-            current_level = std::max(current_level, min_level);
-        }
+    } else if (!first_read_ && diff > 10) {
+        uint8_t smoothed = (last_level_ + current_level) / 2;
+        ESP_LOGI(TAG, "  Smoothed: Large change (%d%% -> %d%%), using average %d%%", last_level_, current_level, smoothed);
+        current_level = smoothed; // ⭐ 拉回一半
     }
     
     // ===== 第一次读取：从NVS恢复 =====
@@ -324,8 +309,8 @@ uint8_t AdcBatteryMonitor::GetBatteryLevel() {
 
                     ESP_LOGW("BAT", "Low battery, use measured");
                 }
-                // ⭐ 再用原逻辑
-                else if (abs((int)measured_level - (int)saved_level) > 30) {
+                // ⭐ 判断 NVS 值是否有效（阈值降低到 5%）
+                else if (abs((int)measured_level - (int)saved_level) > 5) {
                     last_level_ = measured_level;
                     current_level = measured_level;
                     ESP_LOGW("BAT", "NVS level invalid, use measured: %d%% (saved=%d%%)", 
@@ -351,6 +336,21 @@ uint8_t AdcBatteryMonitor::GetBatteryLevel() {
         }
         first_read_ = false;
         return last_level_;
+    }
+
+    // ⭐ 充电/放电逻辑移到 NVS 恢复之后（非第一次读取时才执行）
+    if (is_charging_) {
+        if (current_level > last_level_) {
+            current_level = last_level_ + 1;  // 每次最多+1%
+        } else {
+            current_level = last_level_;     // 不允许下降
+        }
+    } else {
+        // 放电允许缓慢下降
+        if (current_level < last_level_) {
+            uint8_t min_level = (last_level_ > 2) ? (last_level_ - 2) : 0;
+            current_level = std::max(current_level, min_level);
+        }
     }
     
     return GetSmoothedLevel(current_level);
@@ -419,6 +419,42 @@ bool AdcBatteryMonitor::IsVoltageStable(float voltage) {
     return false;
 }
 
+uint8_t AdcBatteryMonitor::CalculateBatteryLevel(float voltage) {
+    if (battery_points_ == nullptr || battery_points_count_ == 0) {
+        ESP_LOGW(TAG, "No battery points available, using default calculation");
+        // 默认线性映射：3.2V=0%, 4.2V=100%
+        if (voltage <= 3.2f) return 0;
+        if (voltage >= 4.2f) return 100;
+        return (uint8_t)((voltage - 3.2f) / 1.0f * 100.0f);
+    }
+    
+    // 查找电压所在的区间
+    for (size_t i = 0; i < battery_points_count_ - 1; i++) {
+        if (voltage >= battery_points_[i + 1].voltage && voltage <= battery_points_[i].voltage) {
+            // 线性插值
+            float v1 = battery_points_[i].voltage;
+            float v2 = battery_points_[i + 1].voltage;
+            int p1 = battery_points_[i].capacity;
+            int p2 = battery_points_[i + 1].capacity;
+            
+            float ratio = (voltage - v2) / (v1 - v2);
+            int level = (int)(p2 + ratio * (p1 - p2));
+            
+            ESP_LOGD(TAG, "Voltage %.3fV in range [%.2fV, %.2fV], level: %d%%", 
+                     voltage, v2, v1, level);
+            
+            return (uint8_t)level;
+        }
+    }
+    
+    // 超出范围
+    if (voltage > battery_points_[0].voltage) {
+        return battery_points_[0].capacity;
+    } else {
+        return battery_points_[battery_points_count_ - 1].capacity;
+    }
+}
+
 void AdcBatteryMonitor::OnChargingStatusChanged(std::function<void(bool)> callback) {
     on_charging_status_changed_ = callback;
 }
@@ -445,12 +481,12 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
     // ① 启动预热（ADC稳定）
     static int warmup_stable_cnt = 0;
 
-    float v = GetBatteryVoltage();
+    float battery_voltage = GetBatteryVoltage();
     
-    // ⭐ 始终更新 last_voltage_，让 IsBatteryConnected() 能正确判断
-    //last_voltage_ = v;
+    // ⭐ 更新 last_voltage_，让 IsBatteryConnected() 能正确判断
+    last_voltage_ = battery_voltage;
 
-    if (!IsVoltageStable(v)) {
+    if (!IsVoltageStable(battery_voltage)) {
         warmup_stable_cnt = 0;
         return;
     } else {
@@ -471,6 +507,10 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         static bool last_raw_status = false;
 
         bool raw = (level == charging_active_level_);
+        
+        ESP_LOGI(TAG, "=== Charging Detection ===");
+        ESP_LOGI(TAG, "  GPIO Level: %d, Active Level: %d, Raw Status: %s", 
+                 level, charging_active_level_, raw ? "CHARGING" : "DISCHARGING");
 
         if (raw == last_raw_status) {
             charge_stable_count++;
@@ -481,10 +521,19 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         last_raw_status = raw;
         static int64_t last_change_time = 0;
         int64_t now = esp_timer_get_time();
+        
+        ESP_LOGI(TAG, "  Stable Count: %d/3, Time Since Last Change: %.1fs", 
+                 charge_stable_count, (now - last_change_time) / 1000000.0f);
 
         if (charge_stable_count >= 3 && (now - last_change_time) > 1000000) {
             new_charging_status = raw;
             last_change_time = now;
+            ESP_LOGI(TAG, "  Status Changed: %s -> %s", 
+                     is_charging_ ? "CHARGING" : "DISCHARGING",
+                     new_charging_status ? "CHARGING" : "DISCHARGING");
+        } else {
+            new_charging_status = is_charging_;
+            ESP_LOGI(TAG, "  Status Unchanged: %s", is_charging_ ? "CHARGING" : "DISCHARGING");
         }
 
 
@@ -496,10 +545,7 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         }
     }
     
-    
-    float battery_voltage = GetBatteryVoltage();   // 先读电压
-    last_voltage_ = battery_voltage;
-    //只调用一次！
+    // ⭐ 使用已保存的电压值，避免重复调用
     bool voltage_stable = IsVoltageStable(battery_voltage);
     //在这里加入“电压锁定机制”
     static int startup_counter = 0;
@@ -532,29 +578,36 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
         // ===== 满电采样（4.2V）=====
         static int full_stable_cnt = 0;
 
-        if (!is_charging_ && battery_voltage > 4.15f && battery_voltage < 4.25f) {
+        if (CAL_CAN_SAMPLE && battery_voltage > CAL_FULL_MIN && battery_voltage < CAL_FULL_MAX) {
             full_stable_cnt++;
+            ESP_LOGI("CAL", "FULL sampling: cnt=%d, voltage=%.3f, max=%.3f", 
+                     full_stable_cnt, battery_voltage, cal_v_adc_full_);
 
             // 始终记录最大值（关键优化）
             cal_v_adc_full_ = std::fmax(cal_v_adc_full_, battery_voltage);
 
-            if (full_stable_cnt >= 8) {
+            if (full_stable_cnt >= CAL_SAMPLE_COUNT) {
                 cal_has_full_ = true;
 
                 ESP_LOGI("CAL", "Captured FULL point: adc=%.3f", battery_voltage);
                     full_stable_cnt = 0;
             }
         } else {
+            if (full_stable_cnt > 0) {
+                ESP_LOGD("CAL", "FULL reset: voltage=%.3f out of range", battery_voltage);
+            }
             full_stable_cnt = 0;
         }
 
         // ===== 中低电采样（3.5~3.7）=====
         static int low_stable_cnt = 0;
 
-        if (!is_charging_ && battery_voltage > 3.5f && battery_voltage < 3.7f) {
+        if (CAL_CAN_SAMPLE && battery_voltage > CAL_LOW_MIN && battery_voltage < CAL_LOW_MAX) {
             low_stable_cnt++;
+            ESP_LOGI("CAL", "LOW sampling: cnt=%d, voltage=%.3f", 
+                     low_stable_cnt, battery_voltage);
 
-            if (low_stable_cnt >= 8) {
+            if (low_stable_cnt >= CAL_SAMPLE_COUNT) {
                 cal_v_adc_low_ = battery_voltage;
                 cal_has_low_ = true;
 
@@ -562,6 +615,9 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
                     low_stable_cnt = 0;
             }
         } else {
+            if (low_stable_cnt > 0) {
+                ESP_LOGD("CAL", "LOW reset: voltage=%.3f out of range", battery_voltage);
+            }
             low_stable_cnt = 0;
         }
 
@@ -611,6 +667,11 @@ void AdcBatteryMonitor::CheckBatteryStatus() {
     }
 
     uint8_t battery_level = GetBatteryLevel();     // 后算电量
+    
+    ESP_LOGI(TAG, "=== Battery Status Summary ===");
+    ESP_LOGI(TAG, "  Voltage: %.3fV, Level: %d%%, Charging: %s", 
+             battery_voltage, battery_level, is_charging_ ? "YES" : "NO");
+    ESP_LOGI(TAG, "  Status Changed: %s", charging_changed ? "YES" : "NO");
         
     int64_t now = esp_timer_get_time(); // 微秒
 

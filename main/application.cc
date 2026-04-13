@@ -847,6 +847,13 @@ void Application::HandleWakeWordDetectedEvent() {
         audio_service_.ResetDecoder();
     }
     
+    // 同时停止 Esp32Music 播放器
+    auto board_music = Board::GetInstance().GetMusic();
+    if (board_music && board_music->IsPlaying()) {
+        ESP_LOGI(TAG, "Stopping Esp32Music streaming due to wake word detected");
+        board_music->StopStreaming();
+    }
+    
     if (!protocol_) {
         return;
     }
