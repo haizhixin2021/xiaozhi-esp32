@@ -184,7 +184,14 @@ void Application::Initialize() {
     AlarmManager::GetInstance().SetAlarmChangeCallback(
         [](const Alarm& alarm, const std::string& action) {
             auto& sync = AlarmCloudSync::GetInstance();
-            if (!sync.IsSyncing()) {
+            if (sync.IsSyncing()) {
+                return;
+            }
+            
+            if (action == "delete") {
+                ESP_LOGI("App", "Alarm deleted, removing from cloud: id=%u", alarm.id);
+                sync.DeleteAlarm(alarm.id);
+            } else {
                 ESP_LOGI("App", "Alarm changed: %s, syncing to cloud...", action.c_str());
                 sync.SyncToCloud(nullptr);
             }

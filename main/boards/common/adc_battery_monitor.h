@@ -28,8 +28,8 @@
 #define CAL_CAN_SAMPLE true
 #else
 #define CAL_SAMPLE_COUNT 8
-#define CAL_FULL_MIN 4.15f
-#define CAL_FULL_MAX 4.25f
+#define CAL_FULL_MIN 4.10f
+#define CAL_FULL_MAX 4.20f
 #define CAL_LOW_MIN 3.5f
 #define CAL_LOW_MAX 3.7f
 #define CAL_CAN_SAMPLE (!is_charging_)

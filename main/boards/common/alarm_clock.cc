@@ -605,30 +605,41 @@ void AlarmManager::OnAlarmTriggered(const Alarm& alarm) {
         alarm_callback_(alarm);
     }
     
-    std::lock_guard<std::mutex> lock(mutex_);
+    bool should_delete = false;
+    Alarm deleted_alarm = alarm;
     
-    auto it = std::find_if(alarms_.begin(), alarms_.end(), 
-                           [id = alarm.id](const Alarm& a) { return a.id == id; });
-    
-    if (it != alarms_.end()) {
-        if (it->repeat_count == -1) {
-            it->trigger_time += it->interval;
-            storage_->SaveAlarm(*it);
-            ESP_LOGI(TAG, "Repeating alarm rescheduled: id=%u", alarm.id);
-        } else if (it->repeat_count > 1) {
-            it->repeat_count--;
-            it->trigger_time += it->interval;
-            storage_->SaveAlarm(*it);
-            ESP_LOGI(TAG, "Repeating alarm rescheduled: id=%u, remaining=%d", 
-                     alarm.id, it->repeat_count);
-        } else {
-            storage_->DeleteAlarm(alarm.id);
-            alarms_.erase(it);
-            ESP_LOGI(TAG, "One-time alarm removed: id=%u", alarm.id);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        auto it = std::find_if(alarms_.begin(), alarms_.end(), 
+                               [id = alarm.id](const Alarm& a) { return a.id == id; });
+        
+        if (it != alarms_.end()) {
+            if (it->repeat_count == -1) {
+                it->trigger_time += it->interval;
+                storage_->SaveAlarm(*it);
+                ESP_LOGI(TAG, "Repeating alarm rescheduled: id=%u", alarm.id);
+            } else if (it->repeat_count > 1) {
+                it->repeat_count--;
+                it->trigger_time += it->interval;
+                storage_->SaveAlarm(*it);
+                ESP_LOGI(TAG, "Repeating alarm rescheduled: id=%u, remaining=%d", 
+                         alarm.id, it->repeat_count);
+            } else {
+                deleted_alarm = *it;
+                storage_->DeleteAlarm(alarm.id);
+                alarms_.erase(it);
+                should_delete = true;
+                ESP_LOGI(TAG, "One-time alarm removed: id=%u", alarm.id);
+            }
         }
+        
+        Reschedule();
     }
     
-    Reschedule();
+    if (should_delete) {
+        NotifyAlarmChange(deleted_alarm, "delete");
+    }
 }
 
 void AlarmManager::Reschedule() {

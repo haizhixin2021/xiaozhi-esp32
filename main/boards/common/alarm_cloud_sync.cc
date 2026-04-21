@@ -358,6 +358,17 @@ bool AlarmCloudSync::DeleteCloudAlarm(uint32_t cloud_id) {
                        "", response);
 }
 
+bool AlarmCloudSync::DeleteAlarm(uint32_t alarm_id) {
+    if (server_url_.empty() || device_id_.empty()) {
+        ESP_LOGW(TAG, "DeleteAlarm not ready: url_empty=%d, device_empty=%d",
+                 server_url_.empty(), device_id_.empty());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Deleting alarm from cloud: id=%u", alarm_id);
+    return DeleteCloudAlarm(alarm_id);
+}
+
 bool AlarmCloudSync::DownloadAlarms(std::vector<CloudAlarm>& alarms) {
     std::string response;
     

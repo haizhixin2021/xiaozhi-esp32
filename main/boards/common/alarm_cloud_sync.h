@@ -36,6 +36,7 @@ public:
     void SyncToCloud(SyncCallback callback = nullptr);
     void SyncFromCloud(SyncCallback callback = nullptr);
     void FullSync(SyncCallback callback = nullptr);
+    bool DeleteAlarm(uint32_t alarm_id);
     
     void SetSyncInterval(int seconds);
     void StartAutoSync();
